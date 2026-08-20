@@ -1157,6 +1157,8 @@ int cmd_fsck(int argc,
 
 		odb_prepare_alternates(repo->objects);
 		for (source = repo->objects->sources; source; source = source->next) {
+			if (source->type != ODB_SOURCE_FILES)
+				continue;
 			child_process_init(&commit_graph_verify);
 			commit_graph_verify.git_cmd = 1;
 			strvec_pushl(&commit_graph_verify.args, "commit-graph",
@@ -1175,6 +1177,8 @@ int cmd_fsck(int argc,
 
 		odb_prepare_alternates(repo->objects);
 		for (source = repo->objects->sources; source; source = source->next) {
+			if (source->type != ODB_SOURCE_FILES)
+				continue;
 			child_process_init(&midx_verify);
 			midx_verify.git_cmd = 1;
 			strvec_pushl(&midx_verify.args, "multi-pack-index",

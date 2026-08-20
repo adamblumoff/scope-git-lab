@@ -2621,6 +2621,7 @@ int cmd_receive_pack(int argc,
 	struct shallow_info si;
 	struct packet_reader reader;
 	struct odb_transaction *transaction = NULL;
+	int segment_primary;
 
 	struct option options[] = {
 		OPT__QUIET(&quiet, N_("quiet")),
@@ -2647,6 +2648,7 @@ int cmd_receive_pack(int argc,
 
 	if (!enter_repo(the_repository, service_dir, 0))
 		die("'%s' does not appear to be a git repository", service_dir);
+	segment_primary = the_repository->objects->sources->type == ODB_SOURCE_SEGMENT;
 
 	repo_config(the_repository, receive_pack_config, NULL);
 	if (cert_nonce_seed)
@@ -2726,7 +2728,7 @@ int cmd_receive_pack(int argc,
 		run_update_post_hook(commands);
 		free_commands(commands);
 		string_list_clear(&push_options, 0);
-		if (auto_gc) {
+		if (auto_gc && !segment_primary) {
 			struct child_process proc = CHILD_PROCESS_INIT;
 
 			if (prepare_auto_maintenance(the_repository, 1, &proc)) {

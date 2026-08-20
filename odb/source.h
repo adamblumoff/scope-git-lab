@@ -23,6 +23,9 @@ enum odb_source_type {
 
 	/* The "in-memory" backend that stores objects in memory. */
 	ODB_SOURCE_INMEMORY,
+
+	/* Experimental immutable segment object store. */
+	ODB_SOURCE_SEGMENT,
 };
 
 struct object_id;
