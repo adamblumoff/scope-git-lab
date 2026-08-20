@@ -426,7 +426,9 @@ static int segment_transaction_commit(struct odb_transaction *base)
 	lock_fd = repo_hold_lock_file_for_update(base->source->odb->repo,
 						 &manifest_lock,
 						 manifest_path.buf,
-						 LOCK_DIE_ON_ERROR);
+						 LOCK_REPORT_ON_ERROR);
+	if (lock_fd < 0)
+		goto out;
 	if (odb_segment_manifest_read(&manifest, manifest_path.buf,
 				      base->source->odb->repo->hash_algo) ||
 	    odb_segment_next_paths(directory.buf, &number, &data_path,
