@@ -140,6 +140,19 @@ test_expect_success 'receive-pack publishes accepted pushes as new segments' '
 		server.git/objects/segments/manifest
 '
 
+test_expect_success 'receive-pack reports manifest lock contention' '
+	test_commit -C client lock-contention &&
+	git -C server.git rev-parse refs/heads/main >lock.old &&
+	touch server.git/objects/segments/manifest.lock &&
+	test_when_finished "rm -f server.git/objects/segments/manifest.lock" &&
+	test_must_fail git -C client push origin HEAD:refs/heads/main 2>err &&
+	test_grep "unable to migrate objects to permanent storage" err &&
+	test_grep ! "remote end hung up unexpectedly" err &&
+	git -C server.git rev-parse refs/heads/main >lock.actual &&
+	test_cmp lock.old lock.actual &&
+	git -C server.git fsck --connectivity-only --no-dangling
+'
+
 test_expect_success 'rejected pushes do not publish a segment' '
 	cp server.git/objects/segments/manifest manifest.before-reject &&
 	write_script server.git/hooks/pre-receive <<-\EOF &&
@@ -269,6 +282,20 @@ test_expect_success 'truncated index is rejected' '
 	test_must_fail git -C repo segment-store stats 2>err &&
 	test_file_not_empty err &&
 	mv index.good repo/.git/objects/segments/00000001.idx
+'
+
+test_expect_success 'implausible canonical size is rejected before allocation' '
+	cp repo/.git/objects/segments/00000001.idx index.good &&
+	test_when_finished "mv index.good \
+		repo/.git/objects/segments/00000001.idx" &&
+	chmod +w repo/.git/objects/segments/00000001.idx &&
+	printf "\177\377\377\377\377\377\377\377" |
+		dd of=repo/.git/objects/segments/00000001.idx \
+		bs=1 seek=$((32 + $(test_oid rawsz) + 8)) \
+		conv=notrunc 2>/dev/null &&
+	corrupt_oid=$(sed -n 1p objects.before) &&
+	test_must_fail git -C repo cat-file -p "$corrupt_oid" 2>err &&
+	test_grep "unable to inflate object from segment" err
 '
 
 test_expect_success POSIXPERM 'segment files honor shared repository permissions' '

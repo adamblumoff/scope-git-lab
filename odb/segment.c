@@ -252,6 +252,39 @@ int odb_segment_lookup(const struct odb_segment *segment,
 	return 1;
 }
 
+static int validate_inflated_size(const void *compressed,
+				  size_t compressed_size,
+				  size_t expected_size)
+{
+	unsigned char scratch[8192];
+	git_zstream stream = { 0 };
+	int status;
+
+	git_inflate_init(&stream);
+	stream.next_in = (unsigned char *)compressed;
+	stream.avail_in = compressed_size;
+	do {
+		size_t total_in = stream.total_in;
+		size_t total_out = stream.total_out;
+
+		stream.next_out = scratch;
+		stream.avail_out = sizeof(scratch);
+		status = git_inflate(&stream, Z_FINISH);
+		if (stream.total_out > expected_size)
+			break;
+		if (status != Z_OK && status != Z_BUF_ERROR)
+			break;
+		if (stream.total_in == total_in && stream.total_out == total_out)
+			break;
+	} while (status == Z_OK || status == Z_BUF_ERROR);
+	git_inflate_end(&stream);
+
+	if (status != Z_STREAM_END || stream.total_in != compressed_size ||
+	    stream.total_out != expected_size)
+		return error(_("unable to inflate object from segment"));
+	return 0;
+}
+
 int odb_segment_read(const struct odb_segment *segment,
 		     const struct odb_segment_index_entry *entry,
 		     void **data)
@@ -267,11 +300,9 @@ int odb_segment_read(const struct odb_segment *segment,
 	if (entry->size >= SIZE_MAX || entry->disk_size > SIZE_MAX)
 		return error(_("segment object is too large to read"));
 	compressed = xmalloc(entry->disk_size);
-	buf = xmallocz(entry->size);
 	data_fd = open(segment->data_path, O_RDONLY);
 	if (data_fd < 0) {
 		free(compressed);
-		free(buf);
 		return error_errno(_("unable to open segment data '%s'"),
 				   segment->data_path);
 	}
@@ -281,14 +312,17 @@ int odb_segment_read(const struct odb_segment *segment,
 		read_result = -1;
 	if (read_result < 0) {
 		free(compressed);
-		free(buf);
 		return error_errno(_("unable to read object from segment"));
 	}
 	if ((uint64_t)read_result != entry->disk_size) {
 		free(compressed);
-		free(buf);
 		return error(_("truncated object in segment"));
 	}
+	if (validate_inflated_size(compressed, entry->disk_size, entry->size)) {
+		free(compressed);
+		return -1;
+	}
+	buf = xmallocz(entry->size);
 	git_inflate_init(&stream);
 	stream.next_in = compressed;
 	stream.avail_in = entry->disk_size;
