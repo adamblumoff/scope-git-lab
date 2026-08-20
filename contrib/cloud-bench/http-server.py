@@ -2,8 +2,10 @@
 
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
@@ -14,11 +16,29 @@ REPO_PREFIX = f"/{REPO_NAME}"
 MAX_REQUEST_BYTES = int(
     os.environ.get("CLOUD_BENCH_MAX_REQUEST_BYTES", str(1024 * 1024 * 1024))
 )
+MAX_BUFFERED_REQUEST_BYTES = int(
+    os.environ.get("CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES", str(MAX_REQUEST_BYTES))
+)
+MAX_CONCURRENT_REQUESTS = int(
+    os.environ.get("CLOUD_BENCH_MAX_CONCURRENT_REQUESTS", "16")
+)
+REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS", "30")
+)
+
+if min(MAX_REQUEST_BYTES, MAX_BUFFERED_REQUEST_BYTES, MAX_CONCURRENT_REQUESTS) <= 0:
+    raise ValueError("request limits must be positive")
+if REQUEST_TIMEOUT_SECONDS <= 0:
+    raise ValueError("request timeout must be positive")
 
 
 class GitHandler(BaseHTTPRequestHandler):
     server_version = "scope-git-cloud-bench"
     sys_version = ""
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
 
     def do_HEAD(self):
         if urlsplit(self.path).path == "/healthz":
@@ -58,11 +78,13 @@ class GitHandler(BaseHTTPRequestHandler):
 
         process = None
         request_body = None
+        reserved_bytes = 0
         try:
             if self.command == "POST":
-                request_body = self._read_request_body()
-                if request_body is None:
+                request = self._read_request_body()
+                if request is None:
                     return
+                request_body, reserved_bytes = request
 
             env = self._cgi_environment(path_info, target.query)
             process = subprocess.Popen(
@@ -80,8 +102,12 @@ class GitHandler(BaseHTTPRequestHandler):
             self.log_error("git http-backend failed: %s", error)
             self.send_error(502)
         finally:
-            if request_body is not None:
-                request_body.close()
+            try:
+                if request_body is not None:
+                    request_body.close()
+            finally:
+                if reserved_bytes:
+                    self.server.release_body_bytes(reserved_bytes)
 
     def _read_request_body(self):
         value = self.headers.get("Content-Length")
@@ -95,19 +121,41 @@ class GitHandler(BaseHTTPRequestHandler):
         if length > MAX_REQUEST_BYTES:
             self.send_error(413)
             return None
+        if not self.server.reserve_body_bytes(length):
+            self.send_error(503, "request-body capacity exhausted")
+            return None
 
-        body = tempfile.TemporaryFile()
-        remaining = length
-        while remaining:
-            chunk = self.rfile.read(min(remaining, 64 * 1024))
-            if not chunk:
+        body = None
+        try:
+            body = tempfile.TemporaryFile()
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(remaining, 64 * 1024))
+                if not chunk:
+                    try:
+                        body.close()
+                    finally:
+                        self.server.release_body_bytes(length)
+                    self.send_error(400)
+                    return None
+                body.write(chunk)
+                remaining -= len(chunk)
+        except (socket.timeout, TimeoutError):
+            try:
                 body.close()
-                self.send_error(400)
-                return None
-            body.write(chunk)
-            remaining -= len(chunk)
+            finally:
+                self.server.release_body_bytes(length)
+            self.send_error(408)
+            return None
+        except Exception:
+            try:
+                if body is not None:
+                    body.close()
+            finally:
+                self.server.release_body_bytes(length)
+            raise
         body.seek(0)
-        return body
+        return body, length
 
     def _cgi_environment(self, path_info, query):
         env = {
@@ -180,6 +228,49 @@ class GitHandler(BaseHTTPRequestHandler):
 
 class GitHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def __init__(self, server_address, handler_class):
+        super().__init__(server_address, handler_class)
+        self._request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        self._body_bytes = 0
+        self._body_lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                try:
+                    request.sendall(
+                        b"HTTP/1.1 503 Service Unavailable\r\n"
+                        b"Connection: close\r\n"
+                        b"Content-Length: 0\r\n\r\n"
+                    )
+                except OSError:
+                    pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def reserve_body_bytes(self, count):
+        with self._body_lock:
+            if count > MAX_BUFFERED_REQUEST_BYTES - self._body_bytes:
+                return False
+            self._body_bytes += count
+            return True
+
+    def release_body_bytes(self, count):
+        with self._body_lock:
+            self._body_bytes -= count
 
 
 port = int(os.environ.get("PORT", "8080"))
