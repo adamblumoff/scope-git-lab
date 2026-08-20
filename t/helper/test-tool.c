@@ -78,6 +78,7 @@ static struct test_cmd cmds[] = {
 	{ "sigchain", cmd__sigchain },
 	{ "simple-ipc", cmd__simple_ipc },
 	{ "string-list", cmd__string_list },
+	{ "storage-layout", cmd__storage_layout },
 	{ "submodule", cmd__submodule },
 	{ "submodule-config", cmd__submodule_config },
 	{ "submodule-nested-repo-config", cmd__submodule_nested_repo_config },

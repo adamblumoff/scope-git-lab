@@ -693,6 +693,7 @@ PTHREAD_LIBS = -lpthread
 # Guard against environment variables
 BUILTIN_OBJS =
 BUILT_INS =
+CLOUD_BENCH_OBJS =
 COMPAT_CFLAGS =
 COMPAT_OBJS =
 XDIFF_OBJS =
@@ -872,6 +873,7 @@ TEST_BUILTINS_OBJS += test-sha256.o
 TEST_BUILTINS_OBJS += test-sigchain.o
 TEST_BUILTINS_OBJS += test-simple-ipc.o
 TEST_BUILTINS_OBJS += test-string-list.o
+TEST_BUILTINS_OBJS += test-storage-layout.o
 TEST_BUILTINS_OBJS += test-submodule-config.o
 TEST_BUILTINS_OBJS += test-submodule-nested-repo-config.o
 TEST_BUILTINS_OBJS += test-submodule.o
@@ -1233,6 +1235,7 @@ LIB_OBJS += odb/source-loose.o
 LIB_OBJS += odb/source-packed.o
 LIB_OBJS += odb/source-segment.o
 LIB_OBJS += odb/segment.o
+LIB_OBJS += odb/segment-group.o
 LIB_OBJS += odb/streaming.o
 LIB_OBJS += odb/transaction.o
 LIB_OBJS += oid-array.o
@@ -1547,6 +1550,7 @@ CLAR_TEST_SUITES += u-list-objects-filter-options
 CLAR_TEST_SUITES += u-mem-pool
 CLAR_TEST_SUITES += u-odb-inmemory
 CLAR_TEST_SUITES += u-oid-array
+CLAR_TEST_SUITES += u-segment-group
 CLAR_TEST_SUITES += u-oidmap
 CLAR_TEST_SUITES += u-oidtree
 CLAR_TEST_SUITES += u-prio-queue
@@ -1846,6 +1850,20 @@ else
                 endif
         endif
 endif
+
+ifdef USE_S3
+        ifdef NO_CURL
+$(error USE_S3 requires libcurl)
+        endif
+	s3_curl_check := $(shell (echo 074b00; $(CURL_CONFIG) --vernum) 2>/dev/null | sort -r | sed -ne 2p)
+        ifneq "$(s3_curl_check)" "074b00"
+$(error USE_S3 requires libcurl 7.75.0 or later and curl-config)
+        endif
+	BASIC_CFLAGS += -DUSE_S3
+	PROGRAM_OBJS += cloud-bench.o
+	CLOUD_BENCH_OBJS += odb/s3-client.o
+endif
+
 IMAP_SEND_LDFLAGS += $(OPENSSL_LINK) $(OPENSSL_LIBSSL) $(LIB_4_CRYPTO)
 
 ifdef ZLIB_NG
@@ -2901,6 +2919,7 @@ endif
 ifndef NO_CURL
 	OBJECTS += http.o http-walker.o remote-curl.o
 endif
+OBJECTS += $(CLOUD_BENCH_OBJS)
 
 .PHONY: objects
 objects: $(OBJECTS)
@@ -3010,6 +3029,10 @@ headless-git$X: headless-git.o git.res GIT-LDFLAGS
 
 git-%$X: %.o GIT-LDFLAGS $(GITLIBS)
 	$(QUIET_LINK)$(CC) $(ALL_CFLAGS) -o $@ $(ALL_LDFLAGS) $(filter %.o,$^) $(LIBS)
+
+git-cloud-bench$X: cloud-bench.o $(CLOUD_BENCH_OBJS) http.o GIT-LDFLAGS $(GITLIBS)
+	$(QUIET_LINK)$(CC) $(ALL_CFLAGS) -o $@ $(ALL_LDFLAGS) $(filter %.o,$^) \
+		$(CURL_LIBCURL) $(LIBS)
 
 git-imap-send$X: imap-send.o $(IMAP_SEND_BUILDDEPS) GIT-LDFLAGS $(GITLIBS)
 	$(QUIET_LINK)$(CC) $(ALL_CFLAGS) -o $@ $(ALL_LDFLAGS) $(filter %.o,$^) \

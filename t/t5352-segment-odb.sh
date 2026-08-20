@@ -217,15 +217,20 @@ test_expect_success 'segment stores retain conventional alternates' '
 	git -C alternate-client fsck --connectivity-only --no-dangling
 '
 
-test_expect_success 'metadata enumeration verifies segment payloads' '
+test_expect_success 'metadata paths do not inflate segment payloads' '
 	cp repo/.git/objects/segments/00000001.seg segment-data.good &&
 	test_when_finished "mv segment-data.good \
 		repo/.git/objects/segments/00000001.seg" &&
 	chmod +w repo/.git/objects/segments/00000001.seg &&
 	printf y | dd of=repo/.git/objects/segments/00000001.seg \
 		bs=1 seek=16 conv=notrunc 2>/dev/null &&
-	test_might_fail git -C repo cat-file --batch-all-objects \
-		--batch-check="%(objectname)" >/dev/null 2>err &&
+	git -C repo cat-file --batch-all-objects \
+		--batch-check="%(objectname)" | sort -u >metadata.objects &&
+	test_cmp objects.before metadata.objects &&
+	git -C repo cat-file --batch-check="%(objectname) %(objecttype) \
+		%(objectsize) %(objectsize:disk)" <objects.before >/dev/null &&
+	git -C repo cat-file -e HEAD^{commit} &&
+	test_might_fail git -C repo fsck --no-dangling 2>err &&
 	test_file_not_empty err
 '
 

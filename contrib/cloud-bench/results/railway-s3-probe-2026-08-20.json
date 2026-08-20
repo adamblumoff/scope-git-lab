@@ -1,0 +1,27 @@
+{
+  "schema": "git-cloud-bench-probe/v1",
+  "measurementScope": "bucket-capability-probe",
+  "cloudMeasured": true,
+  "ok": true,
+  "prefix": "probe/5606df5fb54f80c33afa948d",
+  "failurePhase": null,
+  "raceWinnerCount": 1,
+  "steps": {
+    "immutablePut": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 32, "downloadedBytes": 0},
+    "head": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 0},
+    "fullGet": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 32},
+    "rangeGet": {"attempted": true, "passed": true, "status": 206, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 9},
+    "immutableConflict": {"attempted": true, "passed": true, "status": 412, "errorCode": "PreconditionFailed", "uploadedBytes": 32, "downloadedBytes": 370},
+    "manifestCreate": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 37, "downloadedBytes": 0},
+    "manifestHead": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 0},
+    "manifestCas": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 37, "downloadedBytes": 0},
+    "staleManifestConflict": {"attempted": true, "passed": true, "status": 412, "errorCode": "PreconditionFailed", "uploadedBytes": 37, "downloadedBytes": 368},
+    "manifestFinalGet": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 37},
+    "restartVisibility": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 37},
+    "racePublisherOne": {"attempted": true, "passed": true, "status": 412, "errorCode": null, "uploadedBytes": 46, "downloadedBytes": 368},
+    "racePublisherTwo": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 46, "downloadedBytes": 0},
+    "raceFinalGet": {"attempted": true, "passed": true, "status": 200, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 46},
+    "cleanupManifest": {"attempted": true, "passed": true, "status": 204, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 0},
+    "cleanupImmutable": {"attempted": true, "passed": true, "status": 204, "errorCode": null, "uploadedBytes": 0, "downloadedBytes": 0}
+  }
+}

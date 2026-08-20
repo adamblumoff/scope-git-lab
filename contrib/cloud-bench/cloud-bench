@@ -1,0 +1,60 @@
+#!/bin/sh
+
+set -eu
+
+if test "${1:-}" = serve
+then
+	shift
+	test "$#" = 0 || {
+		echo >&2 "usage: cloud-bench serve"
+		exit 2
+	}
+
+	repo_root=${CLOUD_BENCH_REPO_ROOT:-/app/repos}
+	repo_name=${CLOUD_BENCH_REPO_NAME:-bench.git}
+	case "$repo_root" in
+	/*) ;;
+	*)
+		echo >&2 "CLOUD_BENCH_REPO_ROOT must be an absolute path"
+		exit 2
+		;;
+	esac
+	case "$repo_name" in
+	""|.|..|*[!A-Za-z0-9._-]*)
+		echo >&2 "CLOUD_BENCH_REPO_NAME contains unsupported characters"
+		exit 2
+		;;
+	esac
+
+	mkdir -p "$repo_root"
+	repo_root=$(CDPATH= cd -- "$repo_root" && pwd -P)
+	repo_path=$repo_root/$repo_name
+	if test ! -e "$repo_path"
+	then
+		git init --bare --initial-branch=main "$repo_path" >/dev/null
+	elif test -L "$repo_path" || test ! -d "$repo_path" ||
+		test "$(git -C "$repo_path" rev-parse --is-bare-repository 2>/dev/null)" != true
+	then
+		echo >&2 "repository path is not a bare Git repository: $repo_path"
+		exit 1
+	fi
+
+	case "${CLOUD_BENCH_ALLOW_PUSH:-0}" in
+	1|true|yes) allow_push=true ;;
+	0|false|no) allow_push=false ;;
+	*)
+		echo >&2 "CLOUD_BENCH_ALLOW_PUSH must be true or false"
+		exit 2
+		;;
+	esac
+	git -C "$repo_path" config http.receivepack "$allow_push"
+
+	GIT_HTTP_ROOT=$repo_root
+	GIT_HTTP_REPO_NAME=$repo_name
+	export GIT_HTTP_ROOT GIT_HTTP_REPO_NAME
+
+	script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+	exec python3 "$script_dir/http-server.py"
+fi
+
+exec git cloud-bench "$@"
