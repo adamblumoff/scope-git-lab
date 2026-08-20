@@ -39,15 +39,45 @@ class GitHandler(BaseHTTPRequestHandler):
 
     def setup(self):
         super().setup()
+        self._input_deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        self._input_expired = False
+        self._input_complete = False
+        self._input_lock = threading.Lock()
+        self._input_timer = threading.Timer(
+            REQUEST_TIMEOUT_SECONDS, self._expire_request_input
+        )
+        self._input_timer.daemon = True
+        self._input_timer.start()
         self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
 
+    def finish(self):
+        self._finish_request_input()
+        super().finish()
+
+    def _expire_request_input(self):
+        with self._input_lock:
+            if self._input_complete:
+                return
+            self._input_expired = True
+        try:
+            self.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
+
+    def _finish_request_input(self):
+        with self._input_lock:
+            self._input_complete = True
+        self._input_timer.cancel()
+
     def do_HEAD(self):
+        self._finish_request_input()
         if urlsplit(self.path).path == "/healthz":
             self._send_health(include_body=False)
         else:
             self.send_error(404)
 
     def do_GET(self):
+        self._finish_request_input()
         if urlsplit(self.path).path == "/healthz":
             self._send_health(include_body=True)
             return
@@ -86,6 +116,7 @@ class GitHandler(BaseHTTPRequestHandler):
                 if request is None:
                     return
                 request_body, reserved_bytes = request
+                self._finish_request_input()
 
             env = self._cgi_environment(path_info, target.query)
             process = subprocess.Popen(
@@ -130,9 +161,8 @@ class GitHandler(BaseHTTPRequestHandler):
         try:
             body = tempfile.TemporaryFile()
             remaining = length
-            deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
             while remaining:
-                timeout = deadline - time.monotonic()
+                timeout = self._input_deadline - time.monotonic()
                 if timeout <= 0:
                     raise TimeoutError
                 self.connection.settimeout(timeout)
@@ -142,7 +172,7 @@ class GitHandler(BaseHTTPRequestHandler):
                         body.close()
                     finally:
                         self.server.release_body_bytes(length)
-                    self.send_error(400)
+                    self.send_error(408 if self._input_expired else 400)
                     return None
                 body.write(chunk)
                 remaining -= len(chunk)

@@ -117,9 +117,38 @@ def start_slow_body(length):
 	return sock
 
 
+def start_slow_header():
+	sock = connect()
+	sock.sendall(
+		b"POST " + endpoint + b" HTTP/1.1\r\n"
+		b"Host: localhost\r\n"
+		b"X-Slow: "
+	)
+	return sock
+
+
 def status(sock):
 	return int(sock.recv(64).split(b" ", 2)[1])
 
+
+headers_one = start_slow_header()
+headers_two = start_slow_header()
+time.sleep(0.1)
+excess = connect()
+excess.sendall(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+assert status(excess) == 503
+excess.close()
+for unused in range(3):
+	time.sleep(0.35)
+	for sock in (headers_one, headers_two):
+		try:
+			sock.sendall(b"x")
+		except OSError:
+			pass
+headers_one.close()
+headers_two.close()
+with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
+	assert response.status == 200
 
 trickle = start_slow_body(4)
 for unused in range(3):

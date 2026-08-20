@@ -6,9 +6,9 @@ The wrapper handles `serve` itself for now. It creates one bare repository and e
 
 Set `CLOUD_BENCH_REPO_ROOT` to an absolute repository directory and `CLOUD_BENCH_REPO_NAME` to change the served path. Anonymous pushes are disabled by default. Set `CLOUD_BENCH_ALLOW_PUSH=1` only in an isolated benchmark environment that needs push tests.
 
-The bridge defaults to 16 concurrent requests, a 30-second total body deadline
-and socket inactivity timeout, 1 GiB per request, and 1 GiB total buffered
-request data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
+The bridge defaults to 16 concurrent requests, a 30-second total request-input
+deadline and socket inactivity timeout, 1 GiB per request, and 1 GiB total
+buffered request data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
 `CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS`, `CLOUD_BENCH_MAX_REQUEST_BYTES`, and
 `CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES`. Admission fails with HTTP 503 when a
 server-wide limit is full.
