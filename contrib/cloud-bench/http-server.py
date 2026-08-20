@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urlsplit
+
+
+REPO_ROOT = os.environ["GIT_HTTP_ROOT"]
+REPO_NAME = os.environ["GIT_HTTP_REPO_NAME"]
+REPO_PREFIX = f"/{REPO_NAME}"
+MAX_REQUEST_BYTES = int(
+    os.environ.get("CLOUD_BENCH_MAX_REQUEST_BYTES", str(1024 * 1024 * 1024))
+)
+MAX_BUFFERED_REQUEST_BYTES = int(
+    os.environ.get("CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES", str(MAX_REQUEST_BYTES))
+)
+MAX_CONCURRENT_REQUESTS = int(
+    os.environ.get("CLOUD_BENCH_MAX_CONCURRENT_REQUESTS", "16")
+)
+REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS", "30")
+)
+
+if min(MAX_REQUEST_BYTES, MAX_BUFFERED_REQUEST_BYTES, MAX_CONCURRENT_REQUESTS) <= 0:
+    raise ValueError("request limits must be positive")
+if REQUEST_TIMEOUT_SECONDS <= 0:
+    raise ValueError("request timeout must be positive")
+
+
+class GitHandler(BaseHTTPRequestHandler):
+    server_version = "scope-git-cloud-bench"
+    sys_version = ""
+
+    def setup(self):
+        super().setup()
+        self._input_deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        self._input_expired = False
+        self._input_complete = False
+        self._input_lock = threading.Lock()
+        self._input_timer = threading.Timer(
+            REQUEST_TIMEOUT_SECONDS, self._expire_request_input
+        )
+        self._input_timer.daemon = True
+        self._input_timer.start()
+        self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+
+    def finish(self):
+        self._finish_request_input()
+        super().finish()
+
+    def _expire_request_input(self):
+        with self._input_lock:
+            if self._input_complete:
+                return
+            self._input_expired = True
+        try:
+            self.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
+
+    def _finish_request_input(self):
+        with self._input_lock:
+            self._input_complete = True
+        self._input_timer.cancel()
+
+    def do_HEAD(self):
+        self._finish_request_input()
+        if urlsplit(self.path).path == "/healthz":
+            self._send_health(include_body=False)
+        else:
+            self.send_error(404)
+
+    def do_GET(self):
+        self._finish_request_input()
+        if urlsplit(self.path).path == "/healthz":
+            self._send_health(include_body=True)
+            return
+        self._serve_git()
+
+    def do_POST(self):
+        self._serve_git()
+
+    def _send_health(self, include_body):
+        body = b'{"status":"ok"}\n'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if include_body:
+            self.wfile.write(body)
+
+    def _serve_git(self):
+        target = urlsplit(self.path)
+        path_info = unquote(target.path)
+        endpoint = path_info.removeprefix(REPO_PREFIX)
+        if not path_info.startswith(REPO_PREFIX) or endpoint not in (
+            "/info/refs",
+            "/git-upload-pack",
+            "/git-receive-pack",
+        ):
+            self.send_error(404)
+            return
+
+        process = None
+        request_body = None
+        reserved_bytes = 0
+        try:
+            if self.command == "POST":
+                request = self._read_request_body()
+                if request is None:
+                    return
+                request_body, reserved_bytes = request
+                self._finish_request_input()
+
+            env = self._cgi_environment(path_info, target.query)
+            process = subprocess.Popen(
+                ["git", "http-backend"],
+                stdin=request_body if request_body is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                env=env,
+            )
+            self._forward_cgi_response(process)
+        except (BrokenPipeError, ConnectionResetError):
+            if process is not None:
+                process.terminate()
+                process.wait()
+        except OSError as error:
+            self.log_error("git http-backend failed: %s", error)
+            self.send_error(502)
+        finally:
+            try:
+                if request_body is not None:
+                    request_body.close()
+            finally:
+                if reserved_bytes:
+                    self.server.release_body_bytes(reserved_bytes)
+
+    def _read_request_body(self):
+        value = self.headers.get("Content-Length")
+        try:
+            length = int(value) if value is not None else -1
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.send_error(411)
+            return None
+        if length > MAX_REQUEST_BYTES:
+            self.send_error(413)
+            return None
+        if not self.server.reserve_body_bytes(length):
+            self.send_error(503, "request-body capacity exhausted")
+            return None
+
+        body = None
+        try:
+            body = tempfile.TemporaryFile()
+            remaining = length
+            while remaining:
+                timeout = self._input_deadline - time.monotonic()
+                if timeout <= 0:
+                    raise TimeoutError
+                self.connection.settimeout(timeout)
+                chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                if not chunk:
+                    try:
+                        body.close()
+                    finally:
+                        self.server.release_body_bytes(length)
+                    self.send_error(408 if self._input_expired else 400)
+                    return None
+                body.write(chunk)
+                remaining -= len(chunk)
+            self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+        except (socket.timeout, TimeoutError):
+            self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+            try:
+                body.close()
+            finally:
+                self.server.release_body_bytes(length)
+            self.send_error(408)
+            return None
+        except Exception:
+            try:
+                if body is not None:
+                    body.close()
+            finally:
+                self.server.release_body_bytes(length)
+            raise
+        body.seek(0)
+        return body, length
+
+    def _cgi_environment(self, path_info, query):
+        env = {
+            "GATEWAY_INTERFACE": "CGI/1.1",
+            "GIT_HTTP_EXPORT_ALL": "1",
+            "GIT_PROJECT_ROOT": REPO_ROOT,
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "PATH": os.environ.get("PATH", ""),
+            "PATH_INFO": path_info,
+            "QUERY_STRING": query,
+            "REMOTE_ADDR": self.client_address[0],
+            "REQUEST_METHOD": self.command,
+            "SCRIPT_NAME": "",
+            "SERVER_NAME": self.server.server_name,
+            "SERVER_PORT": str(self.server.server_port),
+            "SERVER_PROTOCOL": self.request_version,
+        }
+        content_length = self.headers.get("Content-Length")
+        content_type = self.headers.get("Content-Type")
+        git_protocol = self.headers.get("Git-Protocol")
+        if content_length is not None:
+            env["CONTENT_LENGTH"] = content_length
+        if content_type is not None:
+            env["CONTENT_TYPE"] = content_type
+        if git_protocol is not None:
+            env["HTTP_GIT_PROTOCOL"] = git_protocol
+        return env
+
+    def _forward_cgi_response(self, process):
+        status = 200
+        headers = []
+        header_bytes = 0
+
+        while True:
+            line = process.stdout.readline(64 * 1024 + 1)
+            header_bytes += len(line)
+            if not line or header_bytes > 64 * 1024:
+                process.terminate()
+                process.wait()
+                self.send_error(502)
+                return
+            if line in (b"\n", b"\r\n"):
+                break
+
+            try:
+                name, value = line.decode("iso-8859-1").rstrip("\r\n").split(":", 1)
+            except ValueError:
+                process.terminate()
+                process.wait()
+                self.send_error(502)
+                return
+            if name.lower() == "status":
+                status = int(value.strip().split(" ", 1)[0])
+            else:
+                headers.append((name, value.strip()))
+
+        self.send_response(status)
+        for name, value in headers:
+            if name.lower() not in ("connection", "status", "transfer-encoding"):
+                self.send_header(name, value)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        shutil.copyfileobj(process.stdout, self.wfile, length=64 * 1024)
+        process.stdout.close()
+        return_code = process.wait()
+        if return_code:
+            self.log_error("git http-backend exited with status %d", return_code)
+
+
+class GitHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, server_address, handler_class):
+        super().__init__(server_address, handler_class)
+        self._request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        self._body_bytes = 0
+        self._body_lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                try:
+                    request.sendall(
+                        b"HTTP/1.1 503 Service Unavailable\r\n"
+                        b"Connection: close\r\n"
+                        b"Content-Length: 0\r\n\r\n"
+                    )
+                except OSError:
+                    pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def reserve_body_bytes(self, count):
+        with self._body_lock:
+            if count > MAX_BUFFERED_REQUEST_BYTES - self._body_bytes:
+                return False
+            self._body_bytes += count
+            return True
+
+    def release_body_bytes(self, count):
+        with self._body_lock:
+            self._body_bytes -= count
+
+
+port = int(os.environ.get("PORT", "8080"))
+GitHTTPServer(("0.0.0.0", port), GitHandler).serve_forever()

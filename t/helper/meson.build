@@ -65,6 +65,7 @@ test_tool_sources = [
   'test-sigchain.c',
   'test-simple-ipc.c',
   'test-string-list.c',
+  'test-storage-layout.c',
   'test-submodule-config.c',
   'test-submodule-nested-repo-config.c',
   'test-submodule.c',

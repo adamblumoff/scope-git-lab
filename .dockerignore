@@ -1,0 +1,22 @@
+.git
+.cache
+.depend
+**/.depend
+**/*.a
+**/*.d
+**/*.o
+compile_commands
+compile_commands.json
+t/chainlinttmp
+t/perf/test-results
+t/test-results
+t/trash directory.*
+GIT-BUILD-OPTIONS
+GIT-CFLAGS
+GIT-LDFLAGS
+GIT-PREFIX
+GIT-SCRIPT-DEFINES
+GIT-USER-AGENT
+GIT-VERSION-FILE
+bin-wrappers/*
+!bin-wrappers/wrap-for-bin.sh

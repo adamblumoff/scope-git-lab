@@ -107,14 +107,12 @@ static int segment_read_entry_info(struct odb_source *base,
 				   const struct odb_segment_index_entry *entry,
 				   struct object_info *oi)
 {
-	void *data;
+	void *data = NULL;
 
-	if (odb_segment_read(segment, entry, &data))
-		return -1;
-	if (!oi) {
-		free(data);
+	if (!oi)
 		return 0;
-	}
+	if (oi->contentp && odb_segment_read(segment, entry, &data))
+		return -1;
 	if (oi->typep)
 		*oi->typep = entry->type;
 	if (oi->sizep)
@@ -125,8 +123,6 @@ static int segment_read_entry_info(struct odb_source *base,
 		oidclr(oi->delta_base_oid, base->odb->repo->hash_algo);
 	if (oi->contentp)
 		*oi->contentp = data;
-	else
-		free(data);
 	if (oi->mtimep)
 		*oi->mtimep = 0;
 	if (oi->source_infop)
@@ -239,11 +235,8 @@ static int segment_each_entry(const struct odb_segment_index_entry *entry,
 	    !segment_match_hash(data->opts->prefix_hex_len,
 				data->opts->prefix->hash, entry->oid.hash))
 		return 0;
-	if (!data->request) {
-		if (segment_read_entry_info(data->source, data->segment, entry, NULL))
-			return -1;
+	if (!data->request)
 		return data->cb(&entry->oid, NULL, data->cb_data);
-	}
 
 	oi = *data->request;
 	if (segment_read_entry_info(data->source, data->segment, entry, &oi))
@@ -292,14 +285,10 @@ static int segment_count_objects(struct odb_source *base,
 
 	for (i = 0; i < source->segments_nr; i++) {
 		struct odb_segment *segment = &source->segments[i];
-		size_t j;
 
-		for (j = 0; j < segment->entries_nr; j++) {
-			if (segment_read_entry_info(base, segment,
-						    &segment->entries[j], NULL))
-				return -1;
-			total++;
-		}
+		if (segment->entries_nr > UINT64_MAX - total)
+			return error(_("segment object count exceeds internal limit"));
+		total += segment->entries_nr;
 	}
 	if (total > ULONG_MAX)
 		return error(_("segment object count exceeds platform limit"));
