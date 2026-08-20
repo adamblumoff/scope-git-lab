@@ -155,6 +155,7 @@
 /git-rm
 /git-send-email
 /git-send-pack
+/git-segment-store
 /git-sh-i18n
 /git-sh-i18n--envsubst
 /git-sh-setup
