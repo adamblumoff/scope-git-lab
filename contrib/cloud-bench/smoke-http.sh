@@ -121,6 +121,17 @@ def status(sock):
 	return int(sock.recv(64).split(b" ", 2)[1])
 
 
+trickle = start_slow_body(4)
+for unused in range(3):
+	time.sleep(0.35)
+	try:
+		trickle.sendall(b"x")
+	except BrokenPipeError:
+		break
+assert status(trickle) == 408
+trickle.close()
+time.sleep(0.1)
+
 reserved = start_slow_body(8)
 time.sleep(0.1)
 overflow = connect()

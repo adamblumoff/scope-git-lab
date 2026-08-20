@@ -6,6 +6,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
@@ -129,8 +130,13 @@ class GitHandler(BaseHTTPRequestHandler):
         try:
             body = tempfile.TemporaryFile()
             remaining = length
+            deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
             while remaining:
-                chunk = self.rfile.read(min(remaining, 64 * 1024))
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise TimeoutError
+                self.connection.settimeout(timeout)
+                chunk = self.rfile.read1(min(remaining, 64 * 1024))
                 if not chunk:
                     try:
                         body.close()
@@ -140,7 +146,9 @@ class GitHandler(BaseHTTPRequestHandler):
                     return None
                 body.write(chunk)
                 remaining -= len(chunk)
+            self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
         except (socket.timeout, TimeoutError):
+            self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
             try:
                 body.close()
             finally:
