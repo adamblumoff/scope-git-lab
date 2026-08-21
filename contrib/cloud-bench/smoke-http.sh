@@ -89,11 +89,28 @@ kill "$server_pid"
 wait "$server_pid" 2>/dev/null || :
 server_pid=
 
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/partial-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/partial-results \
+AWS_S3_BUCKET_NAME=partial-only \
+PORT=$port \
+	"$script_dir/cloud-bench" serve >"$trash/partial-s3.log" 2>&1
+partial_status=$?
+set -e
+test "$partial_status" = 2
+grep "partial AWS S3 environment" "$trash/partial-s3.log" >/dev/null
+test ! -e "$trash/partial-repos/bench.git"
+
 CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
 CLOUD_BENCH_CLOUD_ODB=1 \
 CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_ENDPOINT_URL=https://example.invalid \
+AWS_ACCESS_KEY_ID=marker-access \
+AWS_SECRET_ACCESS_KEY=marker-secret \
 AWS_S3_BUCKET_NAME=marker-smoke \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
 PORT=$port \
 	"$script_dir/cloud-bench" serve >"$trash/marker-server.log" 2>&1 &
 server_pid=$!
@@ -124,7 +141,12 @@ CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
 CLOUD_BENCH_CLOUD_ODB=1 \
 CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_ENDPOINT_URL=https://example.invalid \
+AWS_ACCESS_KEY_ID=marker-access \
+AWS_SECRET_ACCESS_KEY=marker-secret \
 AWS_S3_BUCKET_NAME=marker-smoke \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
 PORT=$port \
 	timeout 2 "$script_dir/cloud-bench" serve \
 		>"$trash/marker-trailing.log" 2>&1
@@ -142,7 +164,12 @@ CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
 CLOUD_BENCH_CLOUD_ODB=1 \
 CLOUD_BENCH_RUN_PREFIX=matrix/different-marker \
+AWS_ENDPOINT_URL=https://example.invalid \
+AWS_ACCESS_KEY_ID=marker-access \
+AWS_SECRET_ACCESS_KEY=marker-secret \
 AWS_S3_BUCKET_NAME=marker-smoke \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
 PORT=$port \
 	timeout 2 "$script_dir/cloud-bench" serve \
 		>"$trash/marker-mismatch.log" 2>&1
@@ -161,7 +188,12 @@ CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
 CLOUD_BENCH_CLOUD_ODB=1 \
 CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_ENDPOINT_URL=https://example.invalid \
+AWS_ACCESS_KEY_ID=marker-access \
+AWS_SECRET_ACCESS_KEY=marker-secret \
 AWS_S3_BUCKET_NAME=marker-smoke \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
 PORT=$port \
 	timeout 2 "$script_dir/cloud-bench" serve \
 		>"$trash/marker-symlink.log" 2>&1
@@ -325,11 +357,13 @@ with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as re
 PY
 
 python3 - "$script_dir/matrix.py" <<'PY'
-import runpy
+import importlib.util
 import sys
 
 
-matrix = runpy.run_path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("cloud_matrix", sys.argv[1])
+matrix = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(matrix)
 samples = [
 	{"writersRaw": [{"success": True, "latencyMs": 1.0}]},
 	{
@@ -340,9 +374,80 @@ samples = [
 		]
 	},
 ]
-latencies = matrix["successful_writer_latencies"](samples)
+latencies = matrix.successful_writer_latencies(samples)
 assert latencies == [1.0, 10.0, 100.0]
-assert matrix["percentile"](latencies, 0.50) == 10.0
+assert matrix.percentile(latencies, 0.50) == 10.0
+
+
+class Corpus:
+	repo = "repo"
+
+	def commit(self, *args, **kwargs):
+		return "commit"
+
+
+class Cursor:
+	def mark(self):
+		return 0
+
+	def read(self, mark):
+		return []
+
+
+matrix.push_one = lambda *args, **kwargs: {
+	"success": False,
+	"stderrClass": "backend-crash",
+}
+matrix.visible_refs = lambda url: (None, {}, "timeout")
+failpoints = matrix.run_failpoints(Corpus(), Cursor(), "url", "run", 0)
+assert all(not item["passed"] for item in failpoints)
+assert all(item["refInspectionExitCode"] is None for item in failpoints)
+PY
+
+kill "$server_pid"
+wait "$server_pid" 2>/dev/null || :
+server_pid=
+
+CLOUD_BENCH_REPO_ROOT=$trash/custom-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/custom-results \
+CLOUD_BENCH_REPO_NAME=custom.git \
+CLOUD_BENCH_ALLOW_PUSH=1 \
+CLOUD_BENCH_CLOUD_ODB=0 \
+PORT=$port \
+	"$script_dir/cloud-bench" serve >"$trash/custom-server.log" 2>&1 &
+server_pid=$!
+attempt=0
+until curl --fail --silent "http://127.0.0.1:$port/healthz" >/dev/null
+do
+	attempt=$((attempt + 1))
+	if test "$attempt" -ge 50 || ! kill -0 "$server_pid" 2>/dev/null
+	then
+		cat "$trash/custom-server.log" >&2
+		exit 1
+	fi
+	sleep 0.1
+done
+set +e
+python3 "$script_dir/matrix.py" --url "http://127.0.0.1:$port" \
+	--repository custom.git --writers 1 --warmups 0 --samples 1 \
+	--payload-bytes 128 --skip-failpoints \
+	--metrics "$trash/custom-metrics.ndjson" \
+	--output "$trash/custom-result.json" >/dev/null
+matrix_status=$?
+set -e
+test "$matrix_status" = 1
+python3 - "$trash/custom-result.json" <<'PY'
+import json
+import sys
+
+
+result = json.load(open(sys.argv[1]))
+layout = result["layouts"][0]
+assert layout["url"].endswith("/custom.git")
+assert layout["seed"]["success"] is True
+assert layout["cloudEvidencePassed"] is False
+assert result["cloudMeasured"] is False
+assert result["ok"] is False
 PY
 
 echo "smart HTTP smoke test passed"

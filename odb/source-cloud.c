@@ -19,6 +19,9 @@
 #define CLOUD_GROUP_HEADER_SIZE 32
 #define CLOUD_CAS_ATTEMPTS 64
 #define CLOUD_GROUP_TARGET (256 * 1024)
+#define CLOUD_MAX_OBJECT_BYTES (16 * 1024 * 1024)
+#define CLOUD_MAX_TRANSACTION_BYTES (32 * 1024 * 1024)
+#define CLOUD_MAX_ARTIFACT_BYTES (64 * 1024 * 1024)
 
 struct cloud_range {
 	struct odb_source_cloud *source;
@@ -29,6 +32,7 @@ struct cloud_range {
 struct cloud_transaction {
 	struct odb_transaction base;
 	struct tmp_objdir *objdir;
+	uint64_t canonical_bytes;
 };
 
 struct cloud_stream {
@@ -230,6 +234,21 @@ static int cloud_open_group(struct odb_source_cloud *source,
 		goto out;
 	}
 	range = NULL;
+	{
+		uint64_t canonical_bytes = 0;
+
+		for (size_t i = 0; i < source->groups[ordinal].entries_nr; i++) {
+			uint64_t object_bytes = source->groups[ordinal].entries[i].size;
+
+			if (object_bytes > CLOUD_MAX_OBJECT_BYTES ||
+			    object_bytes > CLOUD_MAX_TRANSACTION_BYTES - canonical_bytes) {
+				error(_("cloud ODB artifact exceeds the bounded-object policy"));
+				odb_segment_group_close(&source->groups[ordinal]);
+				goto out;
+			}
+			canonical_bytes += object_bytes;
+		}
+	}
 	ret = 0;
 out:
 	cloud_range_release(range);
@@ -630,10 +649,24 @@ static int upload_immutable(struct odb_source_cloud *source, const char *path,
 {
 	struct s3_response response = S3_RESPONSE_INIT;
 	struct strbuf contents = STRBUF_INIT;
+	struct stat st;
 	char hash[GIT_SHA256_HEXSZ + 1];
 	int ret = -1;
 
-	if (strbuf_read_file(&contents, path, 0) < 0)
+	if (stat(path, &st) < 0) {
+		error_errno(_("unable to inspect cloud ODB artifact '%s'"), path);
+		goto out;
+	}
+	if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+		error(_("cloud ODB artifact '%s' is not a regular file"), path);
+		goto out;
+	}
+	if ((uintmax_t)st.st_size > CLOUD_MAX_ARTIFACT_BYTES) {
+		error(_("cloud ODB artifact exceeds the %u-byte upload limit"),
+		      (unsigned)CLOUD_MAX_ARTIFACT_BYTES);
+		goto out;
+	}
+	if (strbuf_read_file(&contents, path, st.st_size) < 0)
 		goto out;
 	sha256_hex(contents.buf, contents.len, hash);
 	strbuf_addf(key, "%s/objects/%s.%s", source->prefix.buf, hash, suffix);
@@ -665,6 +698,7 @@ static int write_group_artifacts(struct odb_source_cloud *source,
 	struct odb_segment_group_writer group = ODB_SEGMENT_GROUP_WRITER_INIT;
 	struct oidset_iter iter;
 	struct object_id *oid;
+	uint64_t canonical_bytes = 0;
 	int ret = -1;
 
 	if (odb_segment_group_writer_open(
@@ -677,7 +711,18 @@ static int write_group_artifacts(struct odb_source_cloud *source,
 		enum object_type type;
 		size_t size;
 		int add_ret;
-		void *data = odb_read_object(source->base.odb, oid, &type, &size);
+		void *data;
+
+		type = odb_read_object_info(source->base.odb, oid, &size);
+		if (type < 0)
+			goto out;
+		if (size > CLOUD_MAX_OBJECT_BYTES ||
+		    size > CLOUD_MAX_TRANSACTION_BYTES - canonical_bytes) {
+			error(_("cloud ODB transaction exceeds the bounded-object policy"));
+			goto out;
+		}
+		canonical_bytes += size;
+		data = odb_read_object(source->base.odb, oid, &type, &size);
 
 		if (!data)
 			goto out;
@@ -839,8 +884,18 @@ static int cloud_transaction_write_stream(struct odb_transaction *base,
 					  struct odb_write_stream *stream,
 					  size_t len, struct object_id *oid)
 {
-	return odb_source_write_object_stream(base->source->odb->sources,
-					      stream, len, oid);
+	struct cloud_transaction *transaction =
+		container_of(base, struct cloud_transaction, base);
+	int ret;
+
+	if (len > CLOUD_MAX_OBJECT_BYTES ||
+	    len > CLOUD_MAX_TRANSACTION_BYTES - transaction->canonical_bytes)
+		return error(_("cloud ODB transaction exceeds the bounded-object policy"));
+	ret = odb_source_write_object_stream(base->source->odb->sources,
+					     stream, len, oid);
+	if (!ret)
+		transaction->canonical_bytes += len;
+	return ret;
 }
 
 static int cloud_transaction_env(struct odb_transaction *base,

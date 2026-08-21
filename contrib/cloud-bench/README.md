@@ -16,7 +16,12 @@ Set `CLOUD_BENCH_REPO_ROOT` to an absolute repository directory and
 `CLOUD_BENCH_REPO_NAME` to change the served path. Anonymous pushes are disabled
 by default. Set `CLOUD_BENCH_ALLOW_PUSH=1` only in an isolated benchmark
 environment. `CLOUD_BENCH_CLOUD_ODB=auto` enables the cloud ODB when bucket
-credentials are present; set it to `0` only for the local HTTP smoke test.
+credentials are present; a partial AWS environment fails startup before a
+repository marker is created. Set it to `0` only for the local HTTP smoke test.
+The POC rejects any canonical object larger than 16 MiB, any receive
+transaction larger than 32 MiB, and any generated artifact larger than 64 MiB.
+Those explicit limits keep publication and read streams bounded until the group
+codec gains incremental object compression and inflation.
 
 The bridge defaults to 64 concurrent requests, a 30-second total request-input
 deadline and socket inactivity timeout, 1 GiB per request, and 1 GiB total
@@ -31,6 +36,9 @@ fails with HTTP 503 when a server-wide limit is full.
 bound with `CLOUD_BENCH_MAX_RESULT_BYTES`. Remote failure injection is disabled
 unless `CLOUD_BENCH_ALLOW_FAILPOINTS=1` is set on the isolated benchmark
 service. A failpoint request header is ignored everywhere else.
+The CGI bridge forwards only the allowlisted AWS, proxy, CA, TLS, and client
+certificate environment needed by the S3 transport; other service secrets stay
+out of `git-http-backend`.
 
 Build and smoke-test the image:
 
@@ -66,10 +74,13 @@ race against the configured bucket.
 
 `matrix` starts bounded-group writers at a barrier and records every writer
 result and storage call. It accepts writer counts, warmups, sample counts, and
-payload size. Each writer level is followed by a fresh mirror clone and strict
-fsck; the default run also injects five receive-pack crash points. Results use
-the `git-cloud-odb-matrix/v1` schema and are written to `/results/latest.json`
-as well as stdout.
+payload size. Use `--repository` or `CLOUD_BENCH_REPO_NAME` when the service is
+not mounted at `bench.git`. Each writer level is followed by a fresh mirror
+clone and strict fsck; the default run also injects five receive-pack crash
+points and requires ref inspection itself to succeed. A run is labeled
+cloud-measured only after its seed push produces S3 request and PUT metrics.
+Results use the `git-cloud-odb-matrix/v1` schema and are written to
+`/results/latest.json` as well as stdout.
 
 The local artifact seam remains covered by
 `t/t5353-storage-layout-benchmark.sh`; its JSON is explicitly labeled

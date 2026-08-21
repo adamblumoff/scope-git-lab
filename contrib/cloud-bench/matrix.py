@@ -7,6 +7,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -362,15 +363,21 @@ def run_failpoints(corpus, cursor, url, run_id, ordinal_base):
         barrier = threading.Barrier(1)
         raw = push_one(barrier, corpus.repo, url, commit, refname, failpoint)
         metrics = cursor.read(mark)
-        _, refs, _ = visible_refs(url)
+        ref_status, refs, ref_error = visible_refs(url)
         results.append(
             {
                 "name": failpoint,
                 "pushAcknowledged": raw["success"],
                 "refVisible": refname in refs,
+                "refInspectionExitCode": ref_status,
+                "refInspectionErrorClass": ref_error,
                 "stderrClass": raw["stderrClass"],
                 "storage": summarize_metrics(metrics),
-                "passed": not raw["success"] and refname not in refs,
+                "passed": (
+                    not raw["success"]
+                    and ref_status == 0
+                    and refname not in refs
+                ),
             }
         )
     return results
@@ -386,6 +393,9 @@ def parse_writer_counts(value):
 def main():
     parser = argparse.ArgumentParser(prog="cloud-bench matrix")
     parser.add_argument("--url", default="http://127.0.0.1:8080")
+    parser.add_argument(
+        "--repository", default=os.environ.get("CLOUD_BENCH_REPO_NAME", "bench.git")
+    )
     parser.add_argument("--writers", type=parse_writer_counts, default=[1, 10, 50])
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--samples", type=int, default=3)
@@ -396,6 +406,11 @@ def main():
     args = parser.parse_args()
     if args.warmups < 0 or args.samples <= 0 or args.payload_bytes <= 0:
         parser.error("warmups, samples, and payload bytes must be positive")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.repository) or args.repository in (
+        ".",
+        "..",
+    ):
+        parser.error("repository contains unsupported characters")
 
     run_id = uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="cloud-odb-matrix-") as temporary:
@@ -404,7 +419,7 @@ def main():
         result = {
             "schema": "git-cloud-odb-matrix/v1",
             "measurementScope": "smart-http-git-workload-over-s3-odb",
-            "cloudMeasured": True,
+            "cloudMeasured": False,
             "runId": run_id,
             "deploymentId": os.environ.get("RAILWAY_DEPLOYMENT_ID"),
             "gitVersion": git(None, "version").stdout.strip(),
@@ -420,27 +435,34 @@ def main():
                 "warmups": args.warmups,
                 "samples": args.samples,
                 "failpoints": not args.skip_failpoints,
+                "repository": args.repository,
             },
             "layouts": [],
         }
         overall_ok = True
         ordinal = 0
         for layout in LAYOUTS:
-            url = f"{args.url.rstrip('/')}/bench.git"
+            url = f"{args.url.rstrip('/')}/{args.repository}"
             seed_ref = f"refs/heads/matrix/{run_id}/seed"
             seed_mark = cursor.mark()
             seed = push_one(
                 threading.Barrier(1), corpus.repo, url, corpus.root_commit, seed_ref
             )
             seed["storage"] = summarize_metrics(cursor.read(seed_mark))
+            cloud_evidence = (
+                seed["storage"]["requests"] > 0
+                and seed["storage"]["puts"] > 0
+            )
+            result["cloudMeasured"] = result["cloudMeasured"] or cloud_evidence
             layout_result = {
                 "id": "C",
                 "layout": layout,
                 "url": url,
                 "seed": seed,
+                "cloudEvidencePassed": cloud_evidence,
                 "writerLevels": [],
             }
-            overall_ok = overall_ok and seed["success"]
+            overall_ok = overall_ok and seed["success"] and cloud_evidence
             layout_result["coldClone"] = verify_repository(
                 url, pathlib.Path(temporary) / f"cold-{layout}", cursor, "cold"
             )

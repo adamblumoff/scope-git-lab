@@ -60,13 +60,46 @@ then
 		;;
 	esac
 
+	if test -n "${AWS_ENDPOINT_URL:-}" ||
+		test -n "${AWS_ACCESS_KEY_ID:-}" ||
+		test -n "${AWS_SECRET_ACCESS_KEY:-}" ||
+		test -n "${AWS_S3_BUCKET_NAME:-}" ||
+		test -n "${AWS_DEFAULT_REGION:-}" ||
+		test -n "${AWS_S3_URL_STYLE:-}"
+	then
+		s3_any=true
+	else
+		s3_any=false
+	fi
+	if test -n "${AWS_ENDPOINT_URL:-}" &&
+		test -n "${AWS_ACCESS_KEY_ID:-}" &&
+		test -n "${AWS_SECRET_ACCESS_KEY:-}" &&
+		test -n "${AWS_S3_BUCKET_NAME:-}" &&
+		test -n "${AWS_DEFAULT_REGION:-}" &&
+		test -n "${AWS_S3_URL_STYLE:-}"
+	then
+		s3_complete=true
+	else
+		s3_complete=false
+	fi
+
 	case "${CLOUD_BENCH_CLOUD_ODB:-auto}" in
-	1|true|yes) cloud_odb=true ;;
+	1|true|yes)
+		cloud_odb=true
+		test "$s3_complete" = true || {
+			echo >&2 "cloud ODB requires the complete AWS S3 environment"
+			exit 2
+		}
+		;;
 	0|false|no) cloud_odb=false ;;
 	auto)
-		if test -n "${AWS_S3_BUCKET_NAME:-}"
+		if test "$s3_complete" = true
 		then
 			cloud_odb=true
+		elif test "$s3_any" = true
+		then
+			echo >&2 "partial AWS S3 environment cannot enable cloud ODB"
+			exit 2
 		else
 			cloud_odb=false
 		fi
