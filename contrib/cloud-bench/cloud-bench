@@ -109,9 +109,37 @@ then
 		exit 2
 		;;
 	esac
+	if test "$cloud_odb" = true
+	then
+		git cloud-bench validate-config
+	fi
 
 	repo_names=$repo_name
 	repo_path=$repo_root/$repo_name
+	marker_path=$repo_path/objects/cloud-odb
+	if test "$cloud_odb" = true
+	then
+		expected_marker=$(printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' \
+			"$run_prefix")
+		expected_marker_oid=$(printf '%s\n' "$expected_marker" |
+			git hash-object --stdin)
+		if test -L "$marker_path" ||
+			{ test -e "$marker_path" && test ! -f "$marker_path"; }
+		then
+			echo >&2 "cloud ODB marker must be a regular file"
+			exit 1
+		fi
+		if test -e "$marker_path" &&
+			test "$(git hash-object "$marker_path")" != "$expected_marker_oid"
+		then
+			echo >&2 "existing cloud ODB marker does not match CLOUD_BENCH_RUN_PREFIX"
+			exit 1
+		fi
+	elif test -e "$marker_path" || test -L "$marker_path"
+	then
+		echo >&2 "refusing to disable an existing cloud ODB marker"
+		exit 1
+	fi
 	if test ! -e "$repo_path"
 	then
 		git init --bare --initial-branch=main "$repo_path" >/dev/null
@@ -124,32 +152,10 @@ then
 	git -C "$repo_path" config http.receivepack "$allow_push"
 	if test "$cloud_odb" = true
 	then
-		marker_path=$repo_path/objects/cloud-odb
-		expected_marker=$(printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' \
-			"$run_prefix")
-		expected_marker_oid=$(printf '%s\n' "$expected_marker" |
-			git hash-object --stdin)
-		if test -L "$marker_path" ||
-			{ test -e "$marker_path" && test ! -f "$marker_path"; }
+		if test ! -e "$marker_path"
 		then
-			echo >&2 "cloud ODB marker must be a regular file"
-			exit 1
-		fi
-		if test -e "$marker_path"
-		then
-			if test "$(git hash-object "$marker_path")" != "$expected_marker_oid"
-			then
-				echo >&2 "existing cloud ODB marker does not match CLOUD_BENCH_RUN_PREFIX"
-				exit 1
-			fi
-		else
 			printf '%s\n' "$expected_marker" >"$marker_path"
 		fi
-	elif test -e "$repo_path/objects/cloud-odb" ||
-		test -L "$repo_path/objects/cloud-odb"
-	then
-		echo >&2 "refusing to disable an existing cloud ODB marker"
-		exit 1
 	fi
 	mkdir -p "$results_dir"
 

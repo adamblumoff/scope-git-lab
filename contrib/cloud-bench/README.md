@@ -17,11 +17,14 @@ Set `CLOUD_BENCH_REPO_ROOT` to an absolute repository directory and
 by default. Set `CLOUD_BENCH_ALLOW_PUSH=1` only in an isolated benchmark
 environment. `CLOUD_BENCH_CLOUD_ODB=auto` enables the cloud ODB when bucket
 credentials are present; a partial AWS environment fails startup before a
-repository marker is created. Set it to `0` only for the local HTTP smoke test.
-The POC rejects any canonical object larger than 16 MiB, any receive
-transaction larger than 32 MiB, and any generated artifact larger than 64 MiB.
-Those explicit limits keep publication and read streams bounded until the group
-codec gains incremental object compression and inflation.
+repository marker is created, and complete credentials are semantically
+validated before the marker is installed. Set it to `0` only for the local HTTP
+smoke test. The POC rejects any canonical object larger than 16 MiB, any receive
+transaction larger than 32 MiB, any publication containing more than 65,536
+objects, and any generated artifact larger than 64 MiB. Those explicit limits
+keep publication metadata and read streams bounded until the group codec gains
+incremental object compression and inflation. Bounded direct writes use the
+same publication path so objects created by receive hooks remain available.
 
 The bridge defaults to 64 concurrent requests, a 30-second total request-input
 deadline and socket inactivity timeout, 1 GiB per request, and 1 GiB total

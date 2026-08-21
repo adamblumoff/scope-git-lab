@@ -8,7 +8,8 @@
 #include "wrapper.h"
 
 static const char cloud_bench_usage[] =
-	"git-cloud-bench probe --json";
+	"git-cloud-bench probe --json\n"
+	"git-cloud-bench validate-config";
 
 static const char race_manifest_one[] =
 	"git-cloud-probe-manifest 1\nrace publisher one\n";
@@ -715,11 +716,22 @@ out:
 	return ret;
 }
 
+static int validate_config(void)
+{
+	struct s3_client client = S3_CLIENT_INIT;
+	int ret = s3_client_init_from_env(&client);
+
+	s3_client_release(&client);
+	return ret ? 1 : 0;
+}
+
 int cmd_main(int argc, const char **argv)
 {
 	trace2_cmd_name("cloud-bench");
 	if (argc == 3 && !strcmp(argv[1], "--race-publisher"))
 		return race_publisher_worker(argv[2]);
+	if (argc == 2 && !strcmp(argv[1], "validate-config"))
+		return validate_config();
 	if (argc != 3 || strcmp(argv[1], "probe") || strcmp(argv[2], "--json"))
 		usage(cloud_bench_usage);
 	return run_probe();

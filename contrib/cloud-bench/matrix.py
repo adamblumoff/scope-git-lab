@@ -82,6 +82,28 @@ def successful_writer_latencies(samples):
     ]
 
 
+def atomic_write_result(output, encoded):
+    output = pathlib.Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, output)
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+
+
 def metric_sum(records, name):
     return sum(record.get(name, 0) for record in records)
 
@@ -544,11 +566,7 @@ def main():
             result["layouts"].append(layout_result)
         result["ok"] = overall_ok
         encoded = json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
-        output = pathlib.Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary_output = output.with_suffix(output.suffix + ".tmp")
-        temporary_output.write_text(encoded)
-        temporary_output.replace(output)
+        atomic_write_result(args.output, encoded)
         sys.stdout.write(encoded)
         return 0 if overall_ok else 1
 

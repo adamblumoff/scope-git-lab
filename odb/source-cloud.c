@@ -22,6 +22,7 @@
 #define CLOUD_MAX_OBJECT_BYTES (16 * 1024 * 1024)
 #define CLOUD_MAX_TRANSACTION_BYTES (32 * 1024 * 1024)
 #define CLOUD_MAX_ARTIFACT_BYTES (64 * 1024 * 1024)
+#define CLOUD_MAX_TRANSACTION_OBJECTS 65536
 
 struct cloud_range {
 	struct odb_source_cloud *source;
@@ -33,6 +34,7 @@ struct cloud_transaction {
 	struct odb_transaction base;
 	struct tmp_objdir *objdir;
 	uint64_t canonical_bytes;
+	struct oidset streamed_objects;
 };
 
 struct cloud_stream {
@@ -592,29 +594,22 @@ static int cloud_freshen_object(struct odb_source *base,
 			oid, mtime);
 }
 
-static int cloud_unsupported_write(struct odb_source *source UNUSED,
-				   const void *buf UNUSED, size_t len UNUSED,
-				   enum object_type type UNUSED,
-				   const struct object_id *oid UNUSED,
-				   const struct object_id *compat_oid UNUSED,
-				   const time_t *mtime UNUSED,
-				   enum odb_write_object_flags flags UNUSED)
-{
-	return error(_("direct writes to the cloud ODB are unsupported"));
-}
+static int cloud_transaction_abort(struct odb_transaction *base);
 
-static int cloud_unsupported_stream(struct odb_source *source UNUSED,
-				    struct odb_write_stream *stream UNUSED,
-				    size_t len UNUSED,
-				    struct object_id *oid UNUSED)
-{
-	return error(_("direct streamed writes to the cloud ODB are unsupported"));
-}
+struct cloud_collect_data {
+	struct oidset *objects;
+};
 
 static int collect_oid(const struct object_id *oid,
 		       struct object_info *oi UNUSED, void *cb_data)
 {
-	oidset_insert(cb_data, oid);
+	struct cloud_collect_data *data = cb_data;
+
+	if (oidset_contains(data->objects, oid))
+		return 0;
+	if (oidset_size(data->objects) >= CLOUD_MAX_TRANSACTION_OBJECTS)
+		return error(_("cloud ODB transaction exceeds the object-count limit"));
+	oidset_insert(data->objects, oid);
 	return 0;
 }
 
@@ -699,6 +694,7 @@ static int write_group_artifacts(struct odb_source_cloud *source,
 	struct oidset_iter iter;
 	struct object_id *oid;
 	uint64_t canonical_bytes = 0;
+	size_t object_count = 0;
 	int ret = -1;
 
 	if (odb_segment_group_writer_open(
@@ -713,6 +709,10 @@ static int write_group_artifacts(struct odb_source_cloud *source,
 		int add_ret;
 		void *data;
 
+		if (object_count >= CLOUD_MAX_TRANSACTION_OBJECTS) {
+			error(_("cloud ODB transaction exceeds the object-count limit"));
+			goto out;
+		}
 		type = odb_read_object_info(source->base.odb, oid, &size);
 		if (type < 0)
 			goto out;
@@ -730,6 +730,7 @@ static int write_group_artifacts(struct odb_source_cloud *source,
 		free(data);
 		if (add_ret)
 			goto out;
+		object_count++;
 	}
 	ret = odb_segment_group_writer_finish(&group, NULL);
 out:
@@ -812,6 +813,7 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 	struct odb_source *incoming = base->source->odb->sources;
 	struct odb_for_each_object_options opts = { 0 };
 	struct oidset objects = OIDSET_INIT;
+	struct cloud_collect_data collect_data = { .objects = &objects };
 	struct strbuf temporary = STRBUF_INIT;
 	struct strbuf data_path = STRBUF_INIT;
 	struct strbuf index_path = STRBUF_INIT;
@@ -822,7 +824,8 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 
 	if (incoming->type != ODB_SOURCE_FILES)
 		BUG("cloud transaction primary source is not files");
-	if (odb_source_for_each_object(incoming, NULL, collect_oid, &objects, &opts))
+	if (odb_source_for_each_object(incoming, NULL, collect_oid, &collect_data,
+				       &opts))
 		goto out;
 	if (!oidset_size(&objects)) {
 		ret = 0;
@@ -871,6 +874,7 @@ out:
 		unlink(index_path.buf);
 	if (temporary.len)
 		rmdir(temporary.buf);
+	oidset_clear(&transaction->streamed_objects);
 	oidset_clear(&objects);
 	strbuf_release(&temporary);
 	strbuf_release(&data_path);
@@ -893,8 +897,15 @@ static int cloud_transaction_write_stream(struct odb_transaction *base,
 		return error(_("cloud ODB transaction exceeds the bounded-object policy"));
 	ret = odb_source_write_object_stream(base->source->odb->sources,
 					     stream, len, oid);
-	if (!ret)
+	if (!ret) {
 		transaction->canonical_bytes += len;
+		if (!oidset_contains(&transaction->streamed_objects, oid)) {
+			if (oidset_size(&transaction->streamed_objects) >=
+			    CLOUD_MAX_TRANSACTION_OBJECTS)
+				return error(_("cloud ODB transaction exceeds the object-count limit"));
+			oidset_insert(&transaction->streamed_objects, oid);
+		}
+	}
 	return ret;
 }
 
@@ -927,6 +938,67 @@ static int cloud_begin_transaction(struct odb_source *source,
 	tmp_objdir_replace_primary_odb(transaction->objdir, 0);
 	*out = &transaction->base;
 	return 0;
+}
+
+static int cloud_transaction_abort(struct odb_transaction *base)
+{
+	struct cloud_transaction *transaction =
+		container_of(base, struct cloud_transaction, base);
+	int ret = 0;
+
+	ASSERT(base == base->source->odb->transaction);
+	if (transaction->objdir && tmp_objdir_destroy(transaction->objdir))
+		ret = error(_("unable to remove failed cloud ODB quarantine"));
+	transaction->objdir = NULL;
+	oidset_clear(&transaction->streamed_objects);
+	base->source->odb->transaction = NULL;
+	free(transaction);
+	return ret;
+}
+
+static int cloud_write_object(struct odb_source *source,
+			      const void *buf, size_t len,
+			      enum object_type type,
+			      const struct object_id *oid,
+			      const struct object_id *compat_oid,
+			      const time_t *mtime,
+			      enum odb_write_object_flags flags)
+{
+	struct odb_transaction *transaction;
+	int ret;
+
+	if (len > CLOUD_MAX_OBJECT_BYTES || len > CLOUD_MAX_TRANSACTION_BYTES)
+		return error(_("cloud ODB transaction exceeds the bounded-object policy"));
+	if (odb_transaction_begin(source->odb, &transaction, 0))
+		return -1;
+	ret = odb_source_write_object(source->odb->sources, buf, len, type, oid,
+				      compat_oid, mtime, flags);
+	if (ret) {
+		if (cloud_transaction_abort(transaction))
+			return -1;
+		return ret;
+	}
+	return odb_transaction_commit(transaction);
+}
+
+static int cloud_write_object_stream(struct odb_source *source,
+				     struct odb_write_stream *stream,
+				     size_t len, struct object_id *oid)
+{
+	struct odb_transaction *transaction;
+	int ret;
+
+	if (len > CLOUD_MAX_OBJECT_BYTES || len > CLOUD_MAX_TRANSACTION_BYTES)
+		return error(_("cloud ODB transaction exceeds the bounded-object policy"));
+	if (odb_transaction_begin(source->odb, &transaction, 0))
+		return -1;
+	ret = odb_transaction_write_object_stream(transaction, stream, len, oid);
+	if (ret) {
+		if (cloud_transaction_abort(transaction))
+			return -1;
+		return ret;
+	}
+	return odb_transaction_commit(transaction);
 }
 
 static int cloud_read_alternates(struct odb_source *source, struct strvec *out)
@@ -1010,8 +1082,8 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->base.count_objects = cloud_count_objects;
 	source->base.find_abbrev_len = cloud_find_abbrev_len;
 	source->base.freshen_object = cloud_freshen_object;
-	source->base.write_object = cloud_unsupported_write;
-	source->base.write_object_stream = cloud_unsupported_stream;
+	source->base.write_object = cloud_write_object;
+	source->base.write_object_stream = cloud_write_object_stream;
 	source->base.begin_transaction = cloud_begin_transaction;
 	source->base.read_alternates = cloud_read_alternates;
 	source->base.write_alternate = cloud_write_alternate;

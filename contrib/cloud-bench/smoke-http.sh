@@ -101,6 +101,35 @@ test "$partial_status" = 2
 grep "partial AWS S3 environment" "$trash/partial-s3.log" >/dev/null
 test ! -e "$trash/partial-repos/bench.git"
 
+expect_invalid_s3 () {
+	label=$1
+	endpoint=$2
+	bucket=$3
+	style=$4
+	set +e
+	env \
+		CLOUD_BENCH_REPO_ROOT="$trash/invalid-$label-repos" \
+		CLOUD_BENCH_RESULTS_DIR="$trash/invalid-$label-results" \
+		CLOUD_BENCH_CLOUD_ODB=1 \
+		AWS_ENDPOINT_URL="$endpoint" \
+		AWS_ACCESS_KEY_ID=invalid-access \
+		AWS_SECRET_ACCESS_KEY=invalid-secret \
+		AWS_S3_BUCKET_NAME="$bucket" \
+		AWS_DEFAULT_REGION=us-east-1 \
+		AWS_S3_URL_STYLE="$style" \
+		PORT=$port \
+		timeout 2 "$script_dir/cloud-bench" serve \
+			>"$trash/invalid-$label.log" 2>&1
+	invalid_status=$?
+	set -e
+	test "$invalid_status" -ne 0
+	test ! -e "$trash/invalid-$label-repos/bench.git"
+}
+
+expect_invalid_s3 style https://example.invalid valid-bucket bogus
+expect_invalid_s3 bucket https://example.invalid invalid_bucket path
+expect_invalid_s3 endpoint http://example.invalid valid-bucket path
+
 CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
 CLOUD_BENCH_CLOUD_ODB=1 \
@@ -370,8 +399,12 @@ with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as re
 PY
 
 python3 - "$script_dir/matrix.py" <<'PY'
+import concurrent.futures
 import importlib.util
+import pathlib
 import sys
+import tempfile
+import threading
 
 
 spec = importlib.util.spec_from_file_location("cloud_matrix", sys.argv[1])
@@ -390,6 +423,20 @@ samples = [
 latencies = matrix.successful_writer_latencies(samples)
 assert latencies == [1.0, 10.0, 100.0]
 assert matrix.percentile(latencies, 0.50) == 10.0
+
+with tempfile.TemporaryDirectory() as directory:
+	output = pathlib.Path(directory) / "latest.json"
+	payloads = ['{"run":1}\n', '{"run":2}\n']
+	barrier = threading.Barrier(2)
+
+	def publish(payload):
+		barrier.wait()
+		matrix.atomic_write_result(output, payload)
+
+	with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+		list(executor.map(publish, payloads))
+	assert output.read_text() in payloads
+	assert not list(output.parent.glob(".latest.json.*.tmp"))
 
 
 class Corpus:

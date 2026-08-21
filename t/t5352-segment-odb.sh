@@ -107,7 +107,8 @@ test_expect_success 'manifest activates segment reads without files ODB data' '
 	test_cmp log.before log.after
 '
 
-test_expect_success 'connectivity-only fsck reads the segment store' '
+test_expect_success 'full and connectivity-only fsck read the segment store' '
+	git -C repo fsck --strict --no-dangling &&
 	git -C repo fsck --connectivity-only --no-dangling
 '
 
@@ -243,7 +244,7 @@ test_expect_success 'metadata paths do not inflate segment payloads' '
 	git -C repo cat-file --batch-check="%(objectname) %(objecttype) \
 		%(objectsize) %(objectsize:disk)" <objects.before >/dev/null &&
 	git -C repo cat-file -e HEAD^{commit} &&
-	test_might_fail git -C repo fsck --no-dangling 2>err &&
+	test_must_fail git -C repo fsck --no-dangling 2>err &&
 	test_file_not_empty err
 '
 
