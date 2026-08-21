@@ -78,6 +78,10 @@ int odb_cloud_manifest_parse(struct odb_cloud_manifest *manifest,
 	int ret = -1;
 
 	odb_cloud_manifest_release(manifest);
+	if (size && memchr(data, '\0', size)) {
+		error(_("cloud ODB manifest contains an embedded NUL byte"));
+		goto out;
+	}
 	strbuf_add(&input, data, size);
 	string_list_split(&lines, input.buf, "\n", -1);
 	if (lines.nr && !*lines.items[lines.nr - 1].string) {

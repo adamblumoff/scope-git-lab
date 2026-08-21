@@ -86,14 +86,12 @@ static int parse_object_dir(const struct option *opt, const char *arg,
 	return 0;
 }
 
-static struct odb_source_files *handle_object_dir_option(struct repository *repo,
-						 bool allow_delegate)
+static struct odb_source_files *handle_object_dir_option(struct repository *repo)
 {
 	struct odb_source *source = odb_find_source(repo->objects, opts.object_dir);
 	if (!source)
 		source = odb_add_to_alternates_memory(repo->objects, opts.object_dir);
-	return allow_delegate ? odb_source_files_delegate(source) :
-		odb_source_files_downcast(source);
+	return odb_source_files_delegate(source);
 }
 
 static struct option common_opts[] = {
@@ -205,7 +203,7 @@ static int cmd_multi_pack_index_write(int argc, const char **argv,
 				   options);
 	}
 
-	source = handle_object_dir_option(repo, false);
+	source = handle_object_dir_option(repo);
 
 	FREE_AND_NULL(options);
 
@@ -281,7 +279,7 @@ static int cmd_multi_pack_index_compact(int argc, const char **argv,
 				   options);
 	}
 
-	source = handle_object_dir_option(the_repository, false);
+	source = handle_object_dir_option(the_repository);
 
 	FREE_AND_NULL(options);
 
@@ -336,7 +334,7 @@ static int cmd_multi_pack_index_verify(int argc, const char **argv,
 	if (argc)
 		usage_with_options(builtin_multi_pack_index_verify_usage,
 				   options);
-	source = handle_object_dir_option(the_repository, true);
+	source = handle_object_dir_option(the_repository);
 
 	FREE_AND_NULL(options);
 
@@ -365,7 +363,7 @@ static int cmd_multi_pack_index_expire(int argc, const char **argv,
 	if (argc)
 		usage_with_options(builtin_multi_pack_index_expire_usage,
 				   options);
-	source = handle_object_dir_option(the_repository, false);
+	source = handle_object_dir_option(the_repository);
 
 	FREE_AND_NULL(options);
 
@@ -397,7 +395,7 @@ static int cmd_multi_pack_index_repack(int argc, const char **argv,
 	if (argc)
 		usage_with_options(builtin_multi_pack_index_repack_usage,
 				   options);
-	source = handle_object_dir_option(the_repository, false);
+	source = handle_object_dir_option(the_repository);
 
 	FREE_AND_NULL(options);
 

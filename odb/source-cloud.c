@@ -854,6 +854,8 @@ static int publish_artifact(struct odb_source_cloud *source,
 
 		if (cloud_get_manifest(source, &manifest, &etag))
 			goto attempt_out;
+		if (cloud_manifest_within_limits(&manifest))
+			goto attempt_out;
 		if (artifact_present(&manifest, data_key, index_key)) {
 			attempt_ret = 0;
 			goto attempt_out;
@@ -861,6 +863,8 @@ static int publish_artifact(struct odb_source_cloud *source,
 		if (manifest.generation == UINT64_MAX ||
 		    odb_cloud_manifest_add(&manifest, data_key, data_bytes,
 					   index_key, index_bytes))
+			goto attempt_out;
+		if (cloud_manifest_within_limits(&manifest))
 			goto attempt_out;
 		manifest.generation++;
 		odb_cloud_manifest_write(&manifest, &serialized);

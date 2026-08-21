@@ -46,3 +46,19 @@ void test_cloud_manifest__rejects_layout_and_unsafe_keys(void)
 					    "safe/index", 1));
 	odb_cloud_manifest_release(&manifest);
 }
+
+void test_cloud_manifest__rejects_embedded_nul(void)
+{
+	static const char embedded_nul[] =
+		"git-cloud-odb-manifest 1\n"
+		"layout group\n"
+		"hash sha1\n"
+		"generation 1\n"
+		"\0artifact data 1 index 1\n";
+	struct odb_cloud_manifest manifest = ODB_CLOUD_MANIFEST_INIT;
+
+	cl_must_fail(odb_cloud_manifest_parse(&manifest, embedded_nul,
+		sizeof(embedded_nul) - 1, hash_algo));
+	cl_assert_equal_u(manifest.artifacts_nr, 0);
+	odb_cloud_manifest_release(&manifest);
+}

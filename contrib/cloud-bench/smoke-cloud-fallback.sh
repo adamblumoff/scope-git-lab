@@ -49,6 +49,8 @@ git -C "$bare" cat-file --batch-all-objects \
 grep "^$fallback_oid$" "$trash/fallback-enumerated" >/dev/null
 git -C "$bare" gc --auto
 git -C "$bare" gc
+git -C "$bare" multi-pack-index write
+git -C "$bare" multi-pack-index verify
 git -C "$bare" repack -ad
 
 printf 'cloud\n' >>"$client/object"
