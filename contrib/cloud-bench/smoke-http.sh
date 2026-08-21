@@ -64,10 +64,20 @@ grep "version 2" "$trash/packet.trace" >/dev/null
 git clone --quiet "$url" "$trash/client"
 git -C "$trash/client" config user.name "Cloud Bench"
 git -C "$trash/client" config user.email "cloud-bench@example.com"
+printf '%s\n' \
+	'#!/bin/sh' \
+	'test -n "$GIT_CLOUD_ODB_METRICS_RUN" || exit 0' \
+	'printf "%s\\n" "$GIT_CLOUD_ODB_METRICS_RUN" >"$GIT_DIR/metrics-run"' \
+	>"$trash/repos/bench.git/hooks/post-receive"
+chmod +x "$trash/repos/bench.git/hooks/post-receive"
 echo smoke >"$trash/client/smoke"
 git -C "$trash/client" add smoke
 git -C "$trash/client" commit --quiet -m smoke
-git -C "$trash/client" push --quiet origin HEAD:main
+metrics_run=0123456789abcdef0123456789abcdef
+git -C "$trash/client" \
+	-c "http.extraHeader=X-Cloud-Odb-Metrics-Run: $metrics_run" \
+	push --quiet origin HEAD:main
+test "$(cat "$trash/repos/bench.git/metrics-run")" = "$metrics_run"
 
 base=$(git -C "$trash/client" rev-parse HEAD) &&
 tree=$(git -C "$trash/client" rev-parse HEAD^{tree}) &&
@@ -438,6 +448,16 @@ with tempfile.TemporaryDirectory() as directory:
 	assert output.read_text() in payloads
 	assert not list(output.parent.glob(".latest.json.*.tmp"))
 
+	metrics = pathlib.Path(directory) / "process.ndjson"
+	run_one = "1" * 32
+	run_two = "2" * 32
+	metrics.write_text(
+		'{"runId":"' + run_one + '","puts":1}\n'
+		'{"runId":"' + run_two + '","puts":50}\n'
+	)
+	cursor = matrix.MetricsCursor(metrics, run_one)
+	assert matrix.summarize_metrics(cursor.read(0))["puts"] == 1
+
 
 class Corpus:
 	repo = "repo"
@@ -458,7 +478,7 @@ matrix.push_one = lambda *args, **kwargs: {
 	"success": False,
 	"stderrClass": "backend-crash",
 }
-matrix.visible_refs = lambda url: (None, {}, "timeout")
+matrix.visible_refs = lambda *args: (None, {}, "timeout")
 failpoints = matrix.run_failpoints(Corpus(), Cursor(), "url", "run", 0)
 assert all(not item["passed"] for item in failpoints)
 assert all(item["refInspectionExitCode"] is None for item in failpoints)

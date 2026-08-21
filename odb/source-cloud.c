@@ -43,12 +43,27 @@ struct cloud_stream {
 	size_t offset;
 };
 
+static const char *metrics_run_id(void)
+{
+	const unsigned char *value =
+		(const unsigned char *)getenv("GIT_CLOUD_ODB_METRICS_RUN");
+	const unsigned char *p;
+
+	if (!value || strlen((const char *)value) != 32)
+		return NULL;
+	for (p = value; *p; p++)
+		if (!isxdigit(*p))
+			return NULL;
+	return (const char *)value;
+}
+
 static void cloud_metric_event(struct odb_source_cloud *source UNUSED,
 			       uint64_t object_reads, uint64_t useful_bytes,
 			       uint64_t group_cache_hits,
 			       uint64_t cas_retries, uint64_t publishes)
 {
 	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
+	const char *run_id = metrics_run_id();
 	struct strbuf line = STRBUF_INIT;
 	int fd;
 
@@ -56,11 +71,16 @@ static void cloud_metric_event(struct odb_source_cloud *source UNUSED,
 		return;
 	strbuf_addf(&line,
 		    "{\"schema\":\"git-cloud-odb-logical/v1\","
-		    "\"pid\":%"PRIuMAX",\"layout\":\"group\","
+		    "\"pid\":%"PRIuMAX,
+		    (uintmax_t)getpid());
+	if (run_id)
+		strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
+	strbuf_addf(&line,
+		    ",\"layout\":\"group\","
 		    "\"objectReads\":%"PRIu64",\"usefulBytes\":%"PRIu64","
 		    "\"groupCacheHits\":%"PRIu64",\"casRetries\":%"PRIu64","
 		    "\"publishes\":%"PRIu64"}\n",
-		    (uintmax_t)getpid(), object_reads, useful_bytes,
+		    object_reads, useful_bytes,
 		    group_cache_hits, cas_retries,
 		    publishes);
 	fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);

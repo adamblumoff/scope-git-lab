@@ -109,8 +109,9 @@ def metric_sum(records, name):
 
 
 class MetricsCursor:
-    def __init__(self, path):
+    def __init__(self, path, run_id):
         self.path = pathlib.Path(path)
+        self.run_id = run_id
 
     def mark(self):
         try:
@@ -128,8 +129,14 @@ class MetricsCursor:
         records = []
         for line in raw.splitlines():
             if line.strip():
-                records.append(json.loads(line))
+                record = json.loads(line)
+                if record.get("runId") == self.run_id:
+                    records.append(record)
         return records
+
+
+def metrics_header(run_id):
+    return f"X-Cloud-Odb-Metrics-Run: {run_id}"
 
 
 def fixed_env(ordinal):
@@ -212,9 +219,15 @@ class Corpus:
         return commit
 
 
-def push_one(barrier, repo, url, commit, refname, failpoint=None):
+def push_one(barrier, repo, url, commit, refname, run_id, failpoint=None):
     barrier.wait()
-    command = ["git", "-C", str(repo)]
+    command = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        f"http.extraHeader={metrics_header(run_id)}",
+    ]
     if failpoint:
         command.extend(("-c", f"http.extraHeader=X-Cloud-Odb-Failpoint: {failpoint}"))
     command.extend(("push", "--porcelain", url, f"{commit}:{refname}"))
@@ -240,9 +253,18 @@ def push_one(barrier, repo, url, commit, refname, failpoint=None):
         }
 
 
-def visible_refs(url):
+def visible_refs(url, run_id):
     try:
-        result = git(None, "ls-remote", "--refs", url, check=False, timeout=90)
+        result = git(
+            None,
+            "-c",
+            f"http.extraHeader={metrics_header(run_id)}",
+            "ls-remote",
+            "--refs",
+            url,
+            check=False,
+            timeout=90,
+        )
     except subprocess.TimeoutExpired:
         return None, {}, "timeout"
     refs = {}
@@ -253,7 +275,7 @@ def visible_refs(url):
     return result.returncode, refs, classify(result.stderr)
 
 
-def verify_repository(url, destination, cursor, cache_state):
+def verify_repository(url, destination, cursor, cache_state, run_id):
     attempts = []
     metrics = []
     clone = None
@@ -265,6 +287,8 @@ def verify_repository(url, destination, cursor, cache_state):
         try:
             clone = git(
                 None,
+                "-c",
+                f"http.extraHeader={metrics_header(run_id)}",
                 "clone",
                 "--quiet",
                 "--mirror",
@@ -347,13 +371,15 @@ def run_sample(corpus, cursor, url, run_id, sample_ordinal, writers, warmup):
     started = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=writers) as executor:
         futures = [
-            executor.submit(push_one, barrier, corpus.repo, url, commit, refname)
+            executor.submit(
+                push_one, barrier, corpus.repo, url, commit, refname, run_id
+            )
             for commit, refname in jobs
         ]
         raw = [future.result() for future in futures]
     wall_ms = round((time.perf_counter() - started) * 1000, 3)
     metrics = cursor.read(mark)
-    _, refs, _ = visible_refs(url)
+    _, refs, _ = visible_refs(url, run_id)
     expected = {item["ref"] for item in raw if item["success"]}
     failed = {item["ref"] for item in raw if not item["success"]}
     successful_latencies = [item["latencyMs"] for item in raw if item["success"]]
@@ -383,9 +409,11 @@ def run_failpoints(corpus, cursor, url, run_id, ordinal_base):
         refname = f"refs/heads/failpoint/{run_id}/{failpoint}"
         mark = cursor.mark()
         barrier = threading.Barrier(1)
-        raw = push_one(barrier, corpus.repo, url, commit, refname, failpoint)
+        raw = push_one(
+            barrier, corpus.repo, url, commit, refname, run_id, failpoint
+        )
         metrics = cursor.read(mark)
-        ref_status, refs, ref_error = visible_refs(url)
+        ref_status, refs, ref_error = visible_refs(url, run_id)
         results.append(
             {
                 "name": failpoint,
@@ -437,7 +465,7 @@ def main():
     run_id = uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="cloud-odb-matrix-") as temporary:
         corpus = Corpus(temporary, run_id, args.payload_bytes)
-        cursor = MetricsCursor(args.metrics)
+        cursor = MetricsCursor(args.metrics, run_id)
         result = {
             "schema": "git-cloud-odb-matrix/v1",
             "measurementScope": "smart-http-git-workload-over-s3-odb",
@@ -468,7 +496,12 @@ def main():
             seed_ref = f"refs/heads/matrix/{run_id}/seed"
             seed_mark = cursor.mark()
             seed = push_one(
-                threading.Barrier(1), corpus.repo, url, corpus.root_commit, seed_ref
+                threading.Barrier(1),
+                corpus.repo,
+                url,
+                corpus.root_commit,
+                seed_ref,
+                run_id,
             )
             seed["storage"] = summarize_metrics(cursor.read(seed_mark))
             cloud_evidence = (
@@ -486,7 +519,11 @@ def main():
             }
             overall_ok = overall_ok and seed["success"] and cloud_evidence
             layout_result["coldClone"] = verify_repository(
-                url, pathlib.Path(temporary) / f"cold-{layout}", cursor, "cold"
+                url,
+                pathlib.Path(temporary) / f"cold-{layout}",
+                cursor,
+                "cold",
+                run_id,
             )
             overall_ok = overall_ok and layout_result["coldClone"]["clone"]
             overall_ok = overall_ok and layout_result["coldClone"]["fsck"]
@@ -523,6 +560,7 @@ def main():
                     pathlib.Path(temporary) / f"verify-{layout}-{writers}",
                     cursor,
                     "post-writes",
+                    run_id,
                 )
                 measured = [sample for sample in samples if not sample["warmup"]]
                 measured_latencies = successful_writer_latencies(measured)
@@ -560,6 +598,7 @@ def main():
                 pathlib.Path(temporary) / f"restart-{layout}",
                 cursor,
                 "fresh-process-restart",
+                run_id,
             )
             overall_ok = overall_ok and layout_result["restartVerification"]["clone"]
             overall_ok = overall_ok and layout_result["restartVerification"]["fsck"]

@@ -60,11 +60,26 @@ static uint64_t range_length(const char *range)
 	return last - first + 1;
 }
 
+static const char *metrics_run_id(void)
+{
+	const unsigned char *value =
+		(const unsigned char *)getenv("GIT_CLOUD_ODB_METRICS_RUN");
+	const unsigned char *p;
+
+	if (!value || strlen((const char *)value) != 32)
+		return NULL;
+	for (p = value; *p; p++)
+		if (!isxdigit(*p))
+			return NULL;
+	return (const char *)value;
+}
+
 static void append_request_metric(enum s3_request_method method,
 				  const char *range,
 				  const struct s3_response *response)
 {
 	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
+	const char *run_id = metrics_run_id();
 	struct strbuf line = STRBUF_INIT;
 	uint64_t requested = range_length(range);
 	int fd;
@@ -73,13 +88,18 @@ static void append_request_metric(enum s3_request_method method,
 		return;
 	strbuf_addf(&line,
 		    "{\"schema\":\"git-cloud-odb-call/v1\","
-		    "\"pid\":%"PRIuMAX",\"method\":\"%s\","
+		    "\"pid\":%"PRIuMAX,
+		    (uintmax_t)getpid());
+	if (run_id)
+		strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
+	strbuf_addf(&line,
+		    ",\"method\":\"%s\","
 		    "\"status\":%ld,\"requests\":1,\"gets\":%d,"
 		    "\"heads\":%d,\"puts\":%d,\"rangeRequests\":%d,"
 		    "\"rangeRequestedBytes\":%"PRIu64","
 		    "\"uploadedBytes\":%"PRIu64","
 		    "\"downloadedBytes\":%"PRIu64",\"conflicts\":%d}\n",
-		    (uintmax_t)getpid(), method_name(method), response->http_status,
+		    method_name(method), response->http_status,
 		    method == S3_REQUEST_GET, method == S3_REQUEST_HEAD,
 		    method == S3_REQUEST_PUT, !!range, requested,
 		    response->uploaded_bytes, response->downloaded_bytes,

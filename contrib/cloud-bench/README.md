@@ -2,6 +2,9 @@
 
 The root `Dockerfile` builds this Git fork with `USE_S3=YesPlease` and installs it in a small Debian runtime image. `/app/bin/cloud-bench` forwards benchmark commands to `git cloud-bench`.
 
+For Meson builds, pass `-Ds3=enabled`. This opt-in feature requires libcurl
+7.75.0 or later and builds both the cloud ODB sources and `git-cloud-bench`.
+
 `serve` exposes Git's stock `git-http-backend` at `/bench.git`. Objects are
 stored as bounded compressed groups with a one-group read cache, immutable
 content-addressed uploads, and ETag-conditional manifest publication. Refs
@@ -82,6 +85,9 @@ not mounted at `bench.git`. Each writer level is followed by a fresh mirror
 clone and strict fsck; the default run also injects five receive-pack crash
 points and requires ref inspection itself to succeed. A run is labeled
 cloud-measured only after its seed push produces S3 request and PUT metrics.
+Each request carries a random run identifier, and the server tags every storage
+event with it, so overlapping matrices can safely share the process metrics
+file without attributing another run's traffic.
 Results use the `git-cloud-odb-matrix/v1` schema and are written to
 `/results/latest.json` as well as stdout.
 

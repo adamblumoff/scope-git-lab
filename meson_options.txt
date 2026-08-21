@@ -39,6 +39,8 @@ option('credential_helpers', type: 'array', value: [ ], choices: [ 'libsecret', 
   description: 'Contributed features to include.')
 option('curl', type: 'feature', value: 'enabled',
   description: 'Build helpers used to access remotes with the HTTP transport.')
+option('s3', type: 'feature', value: 'disabled',
+  description: 'Build the experimental S3-backed object database. Requires libcurl 7.75 or later.')
 option('expat', type: 'feature', value: 'enabled',
   description: 'Build helpers used to push to remotes with the HTTP transport.')
 option('gettext', type: 'feature', value: 'auto',

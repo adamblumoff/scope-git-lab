@@ -1166,6 +1166,11 @@ else
   build_options_config.set('USE_LIBPCRE2', '')
 endif
 
+s3_option = get_option('s3')
+if s3_option.enabled() and get_option('curl').disabled()
+  error('S3 support requires the curl feature')
+endif
+
 curl = dependency('libcurl', version: '>=7.21.3', required: get_option('curl'), default_options: ['default_library=static', 'tests=disabled', 'tool=disabled'])
 use_curl_for_imap_send = false
 if curl.found()
@@ -1181,6 +1186,27 @@ if curl.found()
 else
   libgit_c_args += '-DNO_CURL'
   build_options_config.set('NO_CURL', '1')
+endif
+
+s3_enabled = false
+if s3_option.allowed()
+  if curl.found() and curl.version().version_compare('>=7.75.0')
+    s3_enabled = true
+  elif s3_option.enabled()
+    error('S3 support requires libcurl 7.75.0 or later')
+  endif
+endif
+
+if s3_enabled
+  libgit_sources += [
+    'odb/source-cloud.c',
+    'odb/s3-client.c',
+  ]
+  libgit_c_args += '-DUSE_S3'
+  libgit_dependencies += curl
+  build_options_config.set('USE_S3', 'YesPlease')
+else
+  build_options_config.set('USE_S3', '')
 endif
 
 expat = dependency('expat', required: get_option('expat'), default_options: ['default_library=static', 'build_tests=false'])
@@ -1880,6 +1906,15 @@ git_builtin = executable('git',
 )
 bin_wrappers += git_builtin
 
+if s3_enabled
+  bin_wrappers += executable('git-cloud-bench',
+    sources: 'cloud-bench.c',
+    dependencies: [libgit_commonmain, curl],
+    install: true,
+    install_dir: git_exec_path,
+  )
+endif
+
 test_dependencies += executable('git-daemon',
   sources: 'daemon.c',
   dependencies: [libgit_commonmain],
@@ -2369,6 +2404,7 @@ summary({
   'perl': perl_features_enabled,
   'python': target_python.found(),
   'rust': rust_option.allowed(),
+  's3': s3_enabled,
 }, section: 'Auto-detected features', bool_yn: true)
 
 summary({
