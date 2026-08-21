@@ -166,7 +166,7 @@ class Corpus:
             self.repo,
             "commit-tree",
             "-m",
-            "root",
+            f"root {run_id}",
             empty_tree,
             env=fixed_env(0),
         ).stdout.strip()

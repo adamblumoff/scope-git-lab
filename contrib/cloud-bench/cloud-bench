@@ -117,8 +117,14 @@ then
 	repo_names=$repo_name
 	repo_path=$repo_root/$repo_name
 	marker_path=$repo_path/objects/cloud-odb
+	segment_manifest_path=$repo_path/objects/segments/manifest
 	if test "$cloud_odb" = true
 	then
+		if test -e "$segment_manifest_path" || test -L "$segment_manifest_path"
+		then
+			echo >&2 "refusing to hide an existing segment store with cloud ODB"
+			exit 1
+		fi
 		expected_marker=$(printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' \
 			"$run_prefix")
 		expected_marker_oid=$(printf '%s\n' "$expected_marker" |

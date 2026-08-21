@@ -220,10 +220,45 @@ int repo_add_loose_object_map(struct odb_source_loose *loose,
 
 	if (!should_use_loose_object_map(loose->base.odb->repo))
 		return 0;
+	if (!loose->map)
+		loose_object_map_init(&loose->map);
+	if (!loose->cache) {
+		ALLOC_ARRAY(loose->cache, 1);
+		oidtree_init(loose->cache);
+	}
 
 	inserted = insert_loose_map(loose, oid, compat_oid);
 	if (inserted)
 		return write_one_object(loose, oid, compat_oid);
+	return 0;
+}
+
+int repo_migrate_loose_object_map(struct odb_source_loose *from,
+				  struct odb_source_loose *to)
+{
+	khiter_t iter;
+
+	if (!should_use_loose_object_map(from->base.odb->repo) || !from->map)
+		return 0;
+	if (!to->map)
+		loose_object_map_init(&to->map);
+	if (!to->cache) {
+		ALLOC_ARRAY(to->cache, 1);
+		oidtree_init(to->cache);
+	}
+	for (iter = kh_begin(from->map->to_compat);
+	     iter != kh_end(from->map->to_compat); iter++) {
+		const struct object_id *oid;
+		const struct object_id *compat_oid;
+
+		if (!kh_exist(from->map->to_compat, iter))
+			continue;
+		oid = &kh_key(from->map->to_compat, iter);
+		compat_oid = kh_value(from->map->to_compat, iter);
+		if (insert_loose_map(to, oid, compat_oid) &&
+		    write_one_object(to, oid, compat_oid))
+			return -1;
+	}
 	return 0;
 }
 

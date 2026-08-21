@@ -123,6 +123,16 @@ test_expect_success 'full and connectivity-only fsck read the segment store' '
 	git -C repo fsck --connectivity-only --no-dangling
 '
 
+test_expect_success 'fsck verifies files metadata behind a segment source' '
+	git clone --quiet --bare --no-local \
+		"file://$(pwd)/repo" fsck-metadata.git &&
+	git -C fsck-metadata.git commit-graph write --reachable &&
+	git -C fsck-metadata.git segment-store import &&
+	printf broken >fsck-metadata.git/objects/info/commit-graph &&
+	test_must_fail git -C fsck-metadata.git fsck --strict 2>fsck-metadata.err &&
+	test_file_not_empty fsck-metadata.err
+'
+
 test_expect_success 'upload-pack clones from segment-only storage' '
 	git clone --quiet --no-local "file://$(pwd)/repo" clone-from-segment &&
 	git -C clone-from-segment rev-parse HEAD >clone.head &&

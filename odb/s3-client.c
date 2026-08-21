@@ -18,6 +18,8 @@
 #error "USE_S3 requires libcurl 7.75.0 or later"
 #endif
 
+#define S3_METRICS_MAX_FILE_BYTES (16 * 1024 * 1024)
+
 enum s3_request_method {
 	S3_REQUEST_GET,
 	S3_REQUEST_HEAD,
@@ -74,17 +76,33 @@ static const char *metrics_run_id(void)
 	return (const char *)value;
 }
 
+void s3_metrics_append(const struct strbuf *line)
+{
+	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
+	struct stat st;
+	int fd;
+
+	if (!path || !*path)
+		return;
+	fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);
+	if (fd < 0)
+		return;
+	if (!fstat(fd, &st) && st.st_size >= 0 &&
+	    (uintmax_t)st.st_size <= S3_METRICS_MAX_FILE_BYTES &&
+	    line->len <= S3_METRICS_MAX_FILE_BYTES - (size_t)st.st_size)
+		write_in_full(fd, line->buf, line->len);
+	close(fd);
+}
+
 static void append_request_metric(enum s3_request_method method,
 				  const char *range,
 				  const struct s3_response *response)
 {
-	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
 	const char *run_id = metrics_run_id();
 	struct strbuf line = STRBUF_INIT;
 	uint64_t requested = range_length(range);
-	int fd;
 
-	if (!path || !*path || !run_id)
+	if (!run_id)
 		return;
 	strbuf_addf(&line,
 		    "{\"schema\":\"git-cloud-odb-call/v1\","
@@ -103,11 +121,7 @@ static void append_request_metric(enum s3_request_method method,
 		    method == S3_REQUEST_PUT, !!range, requested,
 		    response->uploaded_bytes, response->downloaded_bytes,
 		    response->http_status == 409 || response->http_status == 412);
-	fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);
-	if (fd >= 0) {
-		write_in_full(fd, line.buf, line.len);
-		close(fd);
-	}
+	s3_metrics_append(&line);
 	strbuf_release(&line);
 }
 

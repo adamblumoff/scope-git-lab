@@ -1,7 +1,9 @@
 #include "git-compat-util.h"
+#include "dir.h"
 #include "gettext.h"
 #include "hash.h"
 #include "hex.h"
+#include "loose.h"
 #include "object-file.h"
 #include "odb/cloud-manifest.h"
 #include "odb/segment-group.h"
@@ -62,12 +64,10 @@ static void cloud_metric_event(struct odb_source_cloud *source UNUSED,
 			       uint64_t group_cache_hits,
 			       uint64_t cas_retries, uint64_t publishes)
 {
-	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
 	const char *run_id = metrics_run_id();
 	struct strbuf line = STRBUF_INIT;
-	int fd;
 
-	if (!path || !*path || !run_id)
+	if (!run_id)
 		return;
 	strbuf_addf(&line,
 		    "{\"schema\":\"git-cloud-odb-logical/v1\","
@@ -82,11 +82,7 @@ static void cloud_metric_event(struct odb_source_cloud *source UNUSED,
 		    object_reads, useful_bytes,
 		    group_cache_hits, cas_retries,
 		    publishes);
-	fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);
-	if (fd >= 0) {
-		write_in_full(fd, line.buf, line.len);
-		close(fd);
-	}
+	s3_metrics_append(&line);
 	strbuf_release(&line);
 }
 
@@ -242,7 +238,8 @@ static int cloud_open_group(struct odb_source_cloud *source,
 	unsigned char header[CLOUD_GROUP_HEADER_SIZE];
 	int ret = -1;
 
-	if (cloud_get_index(source, artifact, &index) ||
+	if (artifact->data_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
+	    cloud_get_index(source, artifact, &index) ||
 	    s3_client_read_range(&source->client, artifact->data_key,
 				 artifact->data_bytes, 0,
 				 CLOUD_GROUP_HEADER_SIZE, header))
@@ -260,6 +257,18 @@ static int cloud_open_group(struct odb_source_cloud *source,
 	range = NULL;
 	{
 		uint64_t canonical_bytes = 0;
+
+		for (size_t i = 0; i < source->groups[ordinal].groups_nr; i++) {
+			const struct odb_segment_group_info *group =
+				&source->groups[ordinal].groups[i];
+
+			if (group->compressed_size > CLOUD_MAX_ARTIFACT_BYTES ||
+			    group->size > CLOUD_MAX_TRANSACTION_BYTES) {
+				error(_("cloud ODB group exceeds the bounded-artifact policy"));
+				odb_segment_group_close(&source->groups[ordinal]);
+				goto out;
+			}
+		}
 
 		for (size_t i = 0; i < source->groups[ordinal].entries_nr; i++) {
 			uint64_t object_bytes = source->groups[ordinal].entries[i].size;
@@ -838,6 +847,7 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 	struct odb_source_cloud *source =
 		container_of(base->source, struct odb_source_cloud, base);
 	struct odb_source *incoming = base->source->odb->sources;
+	struct odb_source_files *incoming_files;
 	struct odb_for_each_object_options opts = { 0 };
 	struct oidset objects = OIDSET_INIT;
 	struct cloud_collect_data collect_data = { .objects = &objects };
@@ -851,6 +861,7 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 
 	if (incoming->type != ODB_SOURCE_FILES)
 		BUG("cloud transaction primary source is not files");
+	incoming_files = odb_source_files_downcast(incoming);
 	if (odb_source_for_each_object(incoming, NULL, collect_oid, &collect_data,
 				       &opts))
 		goto out;
@@ -881,6 +892,11 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 	cloud_failpoint("after-cas");
 	if (cloud_load(source))
 		goto out;
+	if (repo_migrate_loose_object_map(incoming_files->loose,
+					 source->fallback->loose)) {
+		error(_("unable to retain compatibility object mappings"));
+		goto out;
+	}
 	ret = 0;
 
 discard:
@@ -1090,6 +1106,13 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 					      const char *path, bool local)
 {
 	struct odb_source_cloud *source;
+	struct strbuf segment_manifest = STRBUF_INIT;
+
+	strbuf_addf(&segment_manifest, "%s/segments/manifest", path);
+	if (file_exists(segment_manifest.buf))
+		die(_("cloud ODB cannot hide an existing segment store at '%s'"),
+		    path);
+	strbuf_release(&segment_manifest);
 
 	CALLOC_ARRAY(source, 1);
 	source->prefix = (struct strbuf)STRBUF_INIT;

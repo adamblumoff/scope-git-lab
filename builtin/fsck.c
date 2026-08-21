@@ -17,6 +17,7 @@
 #include "object-name.h"
 #include "odb.h"
 #include "odb/source.h"
+#include "odb/source-files.h"
 #include "odb/streaming.h"
 #include "path.h"
 #include "read-cache-ll.h"
@@ -1205,12 +1206,17 @@ int cmd_fsck(int argc,
 
 		odb_prepare_alternates(repo->objects);
 		for (source = repo->objects->sources; source; source = source->next) {
-			if (source->type != ODB_SOURCE_FILES)
+			struct odb_source_files *files;
+
+			if (source->type != ODB_SOURCE_FILES &&
+			    source->type != ODB_SOURCE_SEGMENT &&
+			    source->type != ODB_SOURCE_CLOUD)
 				continue;
+			files = odb_source_files_delegate(source);
 			child_process_init(&commit_graph_verify);
 			commit_graph_verify.git_cmd = 1;
 			strvec_pushl(&commit_graph_verify.args, "commit-graph",
-				     "verify", "--object-dir", source->path, NULL);
+				     "verify", "--object-dir", files->base.path, NULL);
 			if (show_progress)
 				strvec_push(&commit_graph_verify.args, "--progress");
 			else
@@ -1225,12 +1231,17 @@ int cmd_fsck(int argc,
 
 		odb_prepare_alternates(repo->objects);
 		for (source = repo->objects->sources; source; source = source->next) {
-			if (source->type != ODB_SOURCE_FILES)
+			struct odb_source_files *files;
+
+			if (source->type != ODB_SOURCE_FILES &&
+			    source->type != ODB_SOURCE_SEGMENT &&
+			    source->type != ODB_SOURCE_CLOUD)
 				continue;
+			files = odb_source_files_delegate(source);
 			child_process_init(&midx_verify);
 			midx_verify.git_cmd = 1;
 			strvec_pushl(&midx_verify.args, "multi-pack-index",
-				     "verify", "--object-dir", source->path, NULL);
+				     "verify", "--object-dir", files->base.path, NULL);
 			if (show_progress)
 				strvec_push(&midx_verify.args, "--progress");
 			else

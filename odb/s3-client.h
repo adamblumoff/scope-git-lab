@@ -84,6 +84,7 @@ void s3_client_release(struct s3_client *client);
 
 void s3_response_reset(struct s3_response *response);
 void s3_response_release(struct s3_response *response);
+void s3_metrics_append(const struct strbuf *line);
 
 int s3_client_put(struct s3_client *client, const char *key,
 		  const void *data, size_t size,

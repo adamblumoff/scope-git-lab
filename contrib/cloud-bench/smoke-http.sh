@@ -458,6 +458,13 @@ with tempfile.TemporaryDirectory() as directory:
 	cursor = matrix.MetricsCursor(metrics, run_one)
 	assert matrix.summarize_metrics(cursor.read(0))["puts"] == 1
 
+with tempfile.TemporaryDirectory() as directory:
+	first = matrix.Corpus(directory, "1" * 32, 16)
+	first_root = first.root_commit
+with tempfile.TemporaryDirectory() as directory:
+	second = matrix.Corpus(directory, "2" * 32, 16)
+	assert second.root_commit != first_root
+
 
 class Corpus:
 	repo = "repo"
@@ -487,6 +494,34 @@ PY
 kill "$server_pid"
 wait "$server_pid" 2>/dev/null || :
 server_pid=
+
+mkdir -p "$trash/segment-activation-repos"
+cp -R "$trash/repos/bench.git" \
+	"$trash/segment-activation-repos/bench.git"
+git -C "$trash/segment-activation-repos/bench.git" segment-store import
+segment_head=$(git -C "$trash/segment-activation-repos/bench.git" rev-parse main)
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/segment-activation-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/segment-activation-results \
+CLOUD_BENCH_CLOUD_ODB=1 \
+CLOUD_BENCH_RUN_PREFIX=matrix/segment-activation \
+AWS_ENDPOINT_URL=https://example.invalid \
+AWS_ACCESS_KEY_ID=segment-access \
+AWS_SECRET_ACCESS_KEY=segment-secret \
+AWS_S3_BUCKET_NAME=segment-smoke \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
+PORT=$port \
+	timeout 2 "$script_dir/cloud-bench" serve \
+		>"$trash/segment-activation.log" 2>&1
+segment_status=$?
+set -e
+test "$segment_status" = 1
+grep "refusing to hide an existing segment store" \
+	"$trash/segment-activation.log" >/dev/null
+test ! -e "$trash/segment-activation-repos/bench.git/objects/cloud-odb"
+test "$(git -C "$trash/segment-activation-repos/bench.git" rev-parse main)" = \
+	"$segment_head"
 
 CLOUD_BENCH_REPO_ROOT=$trash/custom-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/custom-results \
