@@ -489,26 +489,29 @@ static int cloud_for_each_object(struct odb_source *base,
 		.opts = opts,
 	};
 
-	if ((opts->flags & ODB_FOR_EACH_OBJECT_PROMISOR_ONLY) ||
-	    ((opts->flags & ODB_FOR_EACH_OBJECT_LOCAL_ONLY) && !base->local))
-		return 0;
-	for (size_t i = 0; i < source->readers_nr; i++) {
-		int ret = odb_segment_group_for_each(&source->groups[i],
-						     cloud_each_group, &data);
+	if (!(opts->flags & ODB_FOR_EACH_OBJECT_PROMISOR_ONLY) &&
+	    !((opts->flags & ODB_FOR_EACH_OBJECT_LOCAL_ONLY) && !base->local)) {
+		for (size_t i = 0; i < source->readers_nr; i++) {
+			int ret = odb_segment_group_for_each(&source->groups[i],
+							     cloud_each_group, &data);
 
-		if (ret)
-			return ret;
+			if (ret)
+				return ret;
+		}
 	}
-	return 0;
+
+	return odb_source_for_each_object(&source->fallback->base, request, cb,
+					  cb_data, opts);
 }
 
 static int cloud_count_objects(struct odb_source *base,
-			       enum odb_count_objects_flags flags UNUSED,
+			       enum odb_count_objects_flags flags,
 			       unsigned long *out)
 {
 	struct odb_source_cloud *source = container_of(base, struct odb_source_cloud,
 						       base);
 	uint64_t total = 0;
+	unsigned long fallback_count;
 
 	for (size_t i = 0; i < source->readers_nr; i++) {
 		uint64_t nr = source->groups[i].entries_nr;
@@ -517,6 +520,12 @@ static int cloud_count_objects(struct odb_source *base,
 			return error(_("cloud ODB object count exceeds internal limit"));
 		total += nr;
 	}
+	if (odb_source_count_objects(&source->fallback->base, flags,
+				     &fallback_count))
+		return -1;
+	if (fallback_count > UINT64_MAX - total)
+		return error(_("cloud ODB object count exceeds internal limit"));
+	total += fallback_count;
 	if (total > ULONG_MAX)
 		return error(_("cloud ODB object count exceeds platform limit"));
 	*out = total;

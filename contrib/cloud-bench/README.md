@@ -37,6 +37,14 @@ git ls-remote http://127.0.0.1:8080/bench.git
 contrib/cloud-bench/smoke-http.sh
 ```
 
+With bucket credentials available, the fallback smoke test verifies that an
+existing files-backed repository remains fully enumerable after the cloud ODB
+marker is added, including after a new cloud-backed push:
+
+```sh
+contrib/cloud-bench/smoke-cloud-fallback.sh
+```
+
 Deploy from the repository root, then run benchmark commands inside the service:
 
 ```sh
