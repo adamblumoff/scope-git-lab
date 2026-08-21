@@ -55,6 +55,8 @@ struct odb_cloud_pending_artifact *odb_cloud_manifest_find_pending(
 	struct odb_cloud_manifest *manifest, const char *token);
 int odb_cloud_manifest_remove_pending(struct odb_cloud_manifest *manifest,
 				      const char *token);
+int odb_cloud_manifest_key_is_artifact(const char *key, const char *prefix,
+				       const char *suffix);
 int odb_cloud_manifest_parse(struct odb_cloud_manifest *manifest,
 			     const void *data, size_t size,
 			     const struct git_hash_algo *expected_hash_algo);

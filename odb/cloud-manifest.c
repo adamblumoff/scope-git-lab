@@ -53,6 +53,22 @@ static int valid_token(const char *token)
 	return 1;
 }
 
+int odb_cloud_manifest_key_is_artifact(const char *key, const char *prefix,
+				       const char *suffix)
+{
+	const char *hash;
+
+	if (!skip_prefix(key, prefix, &hash) ||
+	    !skip_prefix(hash, "/objects/", &hash))
+		return 0;
+	for (size_t i = 0; i < GIT_SHA256_HEXSZ; i++)
+		if (!((hash[i] >= '0' && hash[i] <= '9') ||
+		      (hash[i] >= 'a' && hash[i] <= 'f')))
+			return 0;
+	return hash[GIT_SHA256_HEXSZ] == '.' &&
+		!strcmp(hash + GIT_SHA256_HEXSZ + 1, suffix);
+}
+
 int odb_cloud_manifest_add(struct odb_cloud_manifest *manifest,
 			   const char *data_key, uint64_t data_bytes,
 			   const char *index_key, uint64_t index_bytes)

@@ -76,3 +76,29 @@ void test_cloud_manifest__rejects_embedded_nul(void)
 	cl_assert_equal_u(manifest.artifacts_nr, 0);
 	odb_cloud_manifest_release(&manifest);
 }
+
+void test_cloud_manifest__validates_content_addressed_artifact_keys(void)
+{
+	static const char hash[] =
+		"0123456789abcdef0123456789abcdef"
+		"0123456789abcdef0123456789abcdef";
+	struct strbuf key = STRBUF_INIT;
+
+	strbuf_addf(&key, "run/group/objects/%s.gsg", hash);
+	cl_assert(odb_cloud_manifest_key_is_artifact(
+		key.buf, "run/group", "gsg"));
+	cl_assert(!odb_cloud_manifest_key_is_artifact(
+		key.buf, "another/group", "gsg"));
+	cl_assert(!odb_cloud_manifest_key_is_artifact(
+		key.buf, "run/group", "gsi"));
+	strbuf_reset(&key);
+	strbuf_addf(&key, "run/group/objects/%s.gsg/extra", hash);
+	cl_assert(!odb_cloud_manifest_key_is_artifact(
+		key.buf, "run/group", "gsg"));
+	strbuf_reset(&key);
+	strbuf_addf(&key, "run/group/objects/%s.gsg", hash);
+	key.buf[key.len - 5] = 'A';
+	cl_assert(!odb_cloud_manifest_key_is_artifact(
+		key.buf, "run/group", "gsg"));
+	strbuf_release(&key);
+}

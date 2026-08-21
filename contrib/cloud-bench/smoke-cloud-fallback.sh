@@ -27,11 +27,29 @@ git -C "$client" commit --quiet -m fallback
 git -C "$client" push --quiet "$bare" HEAD:main
 git -C "$bare" repack -ad
 
+printf 'loose fallback\n' >>"$client/object"
+git -C "$client" commit --quiet -am loose-fallback
+git -C "$client" push --quiet "$bare" HEAD:main
+fallback_loose_oid=$(git -C "$client" rev-parse HEAD)
+fallback_loose_path=$bare/objects/$(printf '%s' "$fallback_loose_oid" | cut -c1-2)/$(printf '%s' "$fallback_loose_oid" | cut -c3-)
+test -f "$fallback_loose_path"
+
+freshen_contents='freshen fallback object'
+freshen_oid=$(printf '%s' "$freshen_contents" | git -C "$bare" hash-object -w --stdin)
+freshen_path=$bare/objects/$(printf '%s' "$freshen_oid" | cut -c1-2)/$(printf '%s' "$freshen_oid" | cut -c3-)
+freshen_before=$(stat -c %Y "$freshen_path")
+
 fallback_oid=$(git -C "$client" rev-parse HEAD)
 storage_id=$(git cloud-bench validate-config --print-storage-id)
 printf 'git-cloud-odb 2\nlayout group\nprefix %s/group\nstorage %s\n' \
 	"$prefix" "$storage_id" \
 	>"$bare/objects/cloud-odb"
+
+sleep 1
+test "$(printf '%s' "$freshen_contents" |
+	git -C "$bare" hash-object -w --stdin)" = "$freshen_oid"
+freshen_after=$(stat -c %Y "$freshen_path")
+test "$freshen_after" -gt "$freshen_before"
 
 git -C "$bare" commit-graph write
 test -f "$bare/objects/info/commit-graph"
@@ -49,6 +67,8 @@ git -C "$bare" cat-file --batch-all-objects \
 grep "^$fallback_oid$" "$trash/fallback-enumerated" >/dev/null
 git -C "$bare" gc --auto
 git -C "$bare" gc
+test ! -e "$fallback_loose_path"
+git -C "$bare" cat-file -e "$fallback_loose_oid^{commit}"
 git -C "$bare" multi-pack-index write
 git -C "$bare" multi-pack-index verify
 git -C "$bare" repack -ad

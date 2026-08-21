@@ -397,7 +397,8 @@ static int cloud_artifact_equal(const struct odb_cloud_artifact *a,
 		!strcmp(a->index_key, b->index_key);
 }
 
-static int cloud_manifest_within_limits(const struct odb_cloud_manifest *manifest)
+static int cloud_manifest_within_limits(struct odb_source_cloud *source,
+					const struct odb_cloud_manifest *manifest)
 {
 	uint64_t index_bytes = 0;
 
@@ -407,14 +408,24 @@ static int cloud_manifest_within_limits(const struct odb_cloud_manifest *manifes
 	for (size_t i = 0; i < manifest->artifacts_nr; i++) {
 		uint64_t artifact_bytes = manifest->artifacts[i].index_bytes;
 
+		if (!odb_cloud_manifest_key_is_artifact(
+			    manifest->artifacts[i].data_key, source->prefix.buf, "gsg") ||
+		    !odb_cloud_manifest_key_is_artifact(
+			    manifest->artifacts[i].index_key, source->prefix.buf, "gsi"))
+			return error(_("cloud manifest contains an artifact outside its storage prefix"));
 		if (artifact_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
 		    artifact_bytes > CLOUD_MAX_MANIFEST_INDEX_BYTES - index_bytes)
 			return error(_("cloud manifest indexes exceed the size limit"));
 		index_bytes += artifact_bytes;
 	}
 	for (size_t i = 0; i < manifest->pending_nr; i++)
-		if (manifest->pending[i].data_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
-		    manifest->pending[i].index_bytes > CLOUD_MAX_ARTIFACT_BYTES)
+		if (!odb_cloud_manifest_key_is_artifact(
+			    manifest->pending[i].data_key, source->prefix.buf, "gsg") ||
+		    !odb_cloud_manifest_key_is_artifact(
+			    manifest->pending[i].index_key, source->prefix.buf, "gsi"))
+			return error(_("cloud manifest contains a pending artifact outside its storage prefix"));
+		else if (manifest->pending[i].data_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
+			 manifest->pending[i].index_bytes > CLOUD_MAX_ARTIFACT_BYTES)
 			return error(_("cloud manifest has an oversized pending artifact"));
 	return 0;
 }
@@ -429,7 +440,7 @@ static int cloud_load(struct odb_source_cloud *source)
 
 	if (cloud_get_manifest(source, &manifest, &etag))
 		goto out;
-	if (cloud_manifest_within_limits(&manifest))
+	if (cloud_manifest_within_limits(source, &manifest))
 		goto out;
 	if (manifest.artifacts_nr < old_readers ||
 	    source->manifest.artifacts_nr < old_readers)
@@ -744,10 +755,14 @@ static int cloud_freshen_object(struct odb_source *base,
 				const struct object_id *oid,
 				const time_t *mtime)
 {
-	return !cloud_read_object_info(base, oid, NULL, 0) ||
-		odb_source_freshen_object(
-			&container_of(base, struct odb_source_cloud, base)->fallback->base,
-			oid, mtime);
+	struct odb_source_cloud *source = container_of(base, struct odb_source_cloud,
+						       base);
+	const struct odb_segment_group_entry *entry;
+	size_t reader_nr;
+
+	if (!cloud_lookup_segment(source, oid, &reader_nr, &entry))
+		return 1;
+	return odb_source_freshen_object(&source->fallback->base, oid, mtime);
 }
 
 static int cloud_transaction_abort(struct odb_transaction *base);
@@ -906,7 +921,7 @@ static int cloud_cas_manifest(struct odb_source_cloud *source,
 	struct strbuf serialized = STRBUF_INIT;
 	int ret = -1;
 
-	if (cloud_manifest_within_limits(manifest) ||
+	if (cloud_manifest_within_limits(source, manifest) ||
 	    manifest->generation == UINT64_MAX)
 		goto out;
 	manifest->generation++;
@@ -953,7 +968,7 @@ static int register_pending_artifact(struct odb_source_cloud *source,
 		int ret = -1;
 
 		if (cloud_get_manifest(source, &manifest, &etag) ||
-		    cloud_manifest_within_limits(&manifest))
+		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
 		pending = odb_cloud_manifest_find_pending(&manifest, token);
 		if (pending) {
@@ -1021,7 +1036,7 @@ static int recover_pending_artifacts(struct odb_source_cloud *source)
 		int ret = -1;
 
 		if (cloud_get_manifest(source, &manifest, &etag) ||
-		    cloud_manifest_within_limits(&manifest))
+		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
 		for (size_t i = 0; i < manifest.pending_nr; i++) {
 			struct odb_cloud_pending_artifact *pending =
@@ -1162,7 +1177,7 @@ static int publish_artifact(struct odb_source_cloud *source, const char *token,
 		int attempt_ret = -1;
 
 		if (cloud_get_manifest(source, &manifest, &etag) ||
-		    cloud_manifest_within_limits(&manifest))
+		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
 		pending = odb_cloud_manifest_find_pending(&manifest, token);
 		if (!pending || !pending_matches(pending, data_key, data_bytes,
@@ -1426,16 +1441,22 @@ static int cloud_write_alternate(struct odb_source *source UNUSED,
 	return error(_("alternates are unsupported by the cloud ODB"));
 }
 
-static int cloud_optimize(struct odb_source *base UNUSED,
-			  const struct odb_optimize_options *opts UNUSED)
+static int cloud_optimize(struct odb_source *base,
+			  const struct odb_optimize_options *opts)
 {
-	return 0;
+	struct odb_source_cloud *source = container_of(base, struct odb_source_cloud,
+						       base);
+
+	return odb_source_files_optimize(&source->fallback->base, opts);
 }
 
-static bool cloud_optimize_required(struct odb_source *base UNUSED,
-				    const struct odb_optimize_options *opts UNUSED)
+static bool cloud_optimize_required(struct odb_source *base,
+				    const struct odb_optimize_options *opts)
 {
-	return false;
+	struct odb_source_cloud *source = container_of(base, struct odb_source_cloud,
+						       base);
+
+	return odb_source_files_optimize_required(&source->fallback->base, opts);
 }
 
 static void cloud_close(struct odb_source *base)
