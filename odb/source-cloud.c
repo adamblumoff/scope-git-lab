@@ -1060,6 +1060,10 @@ static int recover_pending_artifacts(struct odb_source_cloud *source)
 			manifest.gc_token = xstrdup(gc_token);
 			changed = 1;
 		}
+		if (strcmp(manifest.gc_token, gc_token)) {
+			error(_("cloud ODB recovery is fenced by another GC owner"));
+			goto attempt_out;
+		}
 		if (changed) {
 			ret = cloud_cas_manifest(source, &manifest, &etag);
 			if (!ret)
@@ -1441,13 +1445,10 @@ static int cloud_write_alternate(struct odb_source *source UNUSED,
 	return error(_("alternates are unsupported by the cloud ODB"));
 }
 
-static int cloud_optimize(struct odb_source *base,
-			  const struct odb_optimize_options *opts)
+static int cloud_optimize(struct odb_source *base UNUSED,
+			  const struct odb_optimize_options *opts UNUSED)
 {
-	struct odb_source_cloud *source = container_of(base, struct odb_source_cloud,
-						       base);
-
-	return odb_source_files_optimize(&source->fallback->base, opts);
+	return error(_("files fallback optimization is unsupported by the cloud ODB"));
 }
 
 static bool cloud_optimize_required(struct odb_source *base,

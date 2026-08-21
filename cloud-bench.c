@@ -504,7 +504,8 @@ static int run_probe(void)
 	}
 	strbuf_addbuf(&immutable_etag, &response.etag);
 
-	if (s3_client_get(&client, immutable_key.buf, &response)) {
+	if (s3_client_get_limited(&client, immutable_key.buf,
+				  sizeof(immutable_data) - 1, &response)) {
 		result.failure_phase = "fullGet";
 		goto out;
 	}
@@ -603,7 +604,8 @@ static int run_probe(void)
 		goto out;
 	}
 
-	if (s3_client_get(&client, manifest_key.buf, &response)) {
+	if (s3_client_get_limited(&client, manifest_key.buf,
+				  sizeof(manifest_v2) - 1, &response)) {
 		result.failure_phase = "manifestFinalGet";
 		goto out;
 	}
@@ -627,7 +629,8 @@ static int run_probe(void)
 		result.failure_phase = "restartInit";
 		goto out;
 	}
-	if (s3_client_get(&client, manifest_key.buf, &response)) {
+	if (s3_client_get_limited(&client, manifest_key.buf,
+				  sizeof(manifest_v2) - 1, &response)) {
 		result.failure_phase = "restartVisibility";
 		goto out;
 	}
@@ -674,7 +677,8 @@ static int run_probe(void)
 		result.failure_phase = "raceFinalInit";
 		goto out;
 	}
-	if (s3_client_get(&client, manifest_key.buf, &response)) {
+	if (s3_client_get_limited(&client, manifest_key.buf,
+				  winning_manifest_len, &response)) {
 		result.failure_phase = "raceFinalGet";
 		goto out;
 	}

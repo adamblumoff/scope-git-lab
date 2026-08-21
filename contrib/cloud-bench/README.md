@@ -33,11 +33,16 @@ incremental object compression and inflation. Bounded direct writes use the
 same publication path so objects created by receive hooks remain available.
 Before uploading, each writer records its immutable keys in a conditional
 manifest update. Recovery first marks expired records while holding a manifest
-GC lease, which blocks new registrations but lets current writers publish. It
-then deletes only keys unreachable from committed artifacts or active records
-and clears the lease in a final conditional update. The remote journal survives
-process, container, and host loss. Active records receive a one-hour safety
-window before recovery; local staging cleanup is only a disk-space optimization.
+GC lease, which blocks new registrations but lets current writers publish. Only
+the process that acquired that token may delete unreachable keys or clear the
+lease; another process fails closed instead of acting on a stale manifest. A
+process, container, or host loss before lease acquisition is recovered from the
+remote journal. Loss after acquisition leaves the repository fenced for manual
+repair because safely stealing a distributed delete lease requires a separate
+fencing service. Active records receive a one-hour safety window before
+recovery; local staging cleanup is only a disk-space optimization. Files-backed
+optimization is rejected explicitly after cloud activation because ordinary
+`git repack` would hydrate reachable cloud objects into the local fallback.
 Independent replicas remain unsupported because refs are local.
 
 The bridge accepts at most 64 concurrent requests, further capped by a 512 MiB

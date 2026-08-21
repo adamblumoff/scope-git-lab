@@ -66,8 +66,14 @@ git -C "$bare" cat-file --batch-all-objects \
 	--batch-check='%(objectname)' >"$trash/fallback-enumerated"
 grep "^$fallback_oid$" "$trash/fallback-enumerated" >/dev/null
 git -C "$bare" gc --auto
-git -C "$bare" gc
-test ! -e "$fallback_loose_path"
+set +e
+git -C "$bare" gc >"$trash/gc.out" 2>"$trash/gc.err"
+gc_status=$?
+set -e
+test "$gc_status" -ne 0
+grep "files fallback optimization is unsupported by the cloud ODB" \
+	"$trash/gc.err" >/dev/null
+test -f "$fallback_loose_path"
 git -C "$bare" cat-file -e "$fallback_loose_oid^{commit}"
 git -C "$bare" multi-pack-index write
 git -C "$bare" multi-pack-index verify
