@@ -53,6 +53,22 @@ git -C "$bare" multi-pack-index write
 git -C "$bare" multi-pack-index verify
 git -C "$bare" repack -ad
 
+printf 'failpoint staging\n' >>"$client/object"
+git -C "$client" commit --quiet -am failpoint-staging
+set +e
+GIT_TEST_CLOUD_ODB_FAILPOINT=before-artifact-upload \
+	git -C "$client" push --quiet "$bare" HEAD:main
+failpoint_status=$?
+set -e
+test "$failpoint_status" -ne 0
+set -- "$bare"/objects/cloud-write-*
+test -d "$1"
+git -C "$bare" cat-file -e "$fallback_oid^{commit}"
+for staging in "$bare"/objects/cloud-write-*
+do
+	test ! -e "$staging"
+done
+
 printf 'cloud\n' >>"$client/object"
 git -C "$client" commit --quiet -am cloud
 git -C "$client" push --quiet "$bare" HEAD:main

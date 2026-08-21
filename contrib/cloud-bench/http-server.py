@@ -433,10 +433,18 @@ class GitHandler(BaseHTTPRequestHandler):
                 break
             response_bytes += len(chunk)
             if response_bytes > MAX_RECEIVE_RESPONSE_BYTES:
-                process.terminate()
-                process.wait()
+                response_body.seek(0)
+                self._send_cgi_headers(status, headers)
+                shutil.copyfileobj(response_body, self.wfile, length=64 * 1024)
                 response_body.close()
-                self.send_error(502, "receive-pack response is too large")
+                self.wfile.write(chunk)
+                shutil.copyfileobj(process.stdout, self.wfile, length=64 * 1024)
+                process.stdout.close()
+                return_code = process.wait()
+                if return_code:
+                    self.log_error(
+                        "git http-backend exited with status %d", return_code
+                    )
                 return
             response_body.write(chunk)
         process.stdout.close()

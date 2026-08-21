@@ -29,6 +29,7 @@ CLOUD_BENCH_REPO_ROOT=$trash/repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=1 \
 CLOUD_BENCH_CLOUD_ODB=0 \
+CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES=64 \
 CLOUD_BENCH_LATEST_RESULT=$script_dir/results/railway-cloud-odb-matrix-2026-08-20.json \
 AWS_SESSION_TOKEN=session-token-smoke \
 PORT=$port \
@@ -69,6 +70,7 @@ printf '%s\n' \
 	'#!/bin/sh' \
 	'test "$AWS_SESSION_TOKEN" = session-token-smoke || exit 1' \
 	'test -n "$GIT_CLOUD_ODB_METRICS_RUN" || exit 0' \
+	'printf "%0256d\n" 0' \
 	'printf "%s\\n" "$GIT_CLOUD_ODB_METRICS_RUN" >"$GIT_DIR/metrics-run"' \
 	>"$trash/repos/bench.git/hooks/post-receive"
 chmod +x "$trash/repos/bench.git/hooks/post-receive"

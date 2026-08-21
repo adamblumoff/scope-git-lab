@@ -133,6 +133,17 @@ test_expect_success 'fsck verifies files metadata behind a segment source' '
 	test_file_not_empty fsck-metadata.err
 '
 
+test_expect_success 'fsck checks loose rollback objects behind a segment source' '
+	rollback_loose_oid=$(printf "loose rollback object" | git hash-object --stdin) &&
+	rollback_loose_dir=$(printf "%s" "$rollback_loose_oid" | cut -c1-2) &&
+	rollback_loose_file=$(printf "%s" "$rollback_loose_oid" | cut -c3-) &&
+	mkdir -p "repo/.git/objects/$rollback_loose_dir" &&
+	printf broken >"repo/.git/objects/$rollback_loose_dir/$rollback_loose_file" &&
+	test_must_fail git -C repo fsck --strict --no-dangling 2>loose-fsck.err &&
+	test_file_not_empty loose-fsck.err &&
+	rm "repo/.git/objects/$rollback_loose_dir/$rollback_loose_file"
+'
+
 test_expect_success 'upload-pack clones from segment-only storage' '
 	git clone --quiet --no-local "file://$(pwd)/repo" clone-from-segment &&
 	git -C clone-from-segment rev-parse HEAD >clone.head &&

@@ -117,6 +117,64 @@ static int valid_prefix(const char *prefix)
 	return 1;
 }
 
+static int cloud_staging_owner(const char *name, pid_t *owner)
+{
+	const char *value;
+	char *end;
+	uintmax_t parsed;
+
+	if (!skip_prefix(name, "cloud-write-", &value))
+		return -1;
+	errno = 0;
+	parsed = strtoumax(value, &end, 10);
+	if (errno || end == value || parsed == 0 ||
+	    parsed > maximum_signed_value_of_type(pid_t) || *end++ != '-' ||
+	    strlen(end) != 6)
+		return -1;
+	for (const unsigned char *p = (const unsigned char *)end; *p; p++)
+		if (!isalnum(*p))
+			return -1;
+	*owner = (pid_t)parsed;
+	return 0;
+}
+
+static void cloud_cleanup_staging(const char *objects_path)
+{
+	struct dirent *entry;
+	DIR *dir = opendir(objects_path);
+
+	if (!dir)
+		return;
+	while ((entry = readdir(dir)) != NULL) {
+		struct strbuf path = STRBUF_INIT;
+		struct stat st;
+		size_t directory_len;
+		pid_t owner;
+
+		if (cloud_staging_owner(entry->d_name, &owner))
+			continue;
+		if (kill(owner, 0) == 0 || errno == EPERM)
+			continue;
+		if (errno != ESRCH)
+			continue;
+		strbuf_addf(&path, "%s/%s", objects_path, entry->d_name);
+		if (lstat(path.buf, &st) || !S_ISDIR(st.st_mode)) {
+			strbuf_release(&path);
+			continue;
+		}
+		directory_len = path.len;
+		strbuf_addstr(&path, "/data.gsg");
+		unlink(path.buf);
+		strbuf_setlen(&path, directory_len);
+		strbuf_addstr(&path, "/index.gsi");
+		unlink(path.buf);
+		strbuf_setlen(&path, directory_len);
+		rmdir(path.buf);
+		strbuf_release(&path);
+	}
+	closedir(dir);
+}
+
 static int read_marker(const char *objects_path, struct strbuf *prefix,
 		       const char *storage_id)
 {
@@ -931,7 +989,8 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 		ret = 0;
 		goto discard;
 	}
-	strbuf_addf(&temporary, "%s/cloud-write-XXXXXX", base->source->path);
+	strbuf_addf(&temporary, "%s/cloud-write-%"PRIuMAX"-XXXXXX",
+		    base->source->path, (uintmax_t)getpid());
 	if (!mkdtemp(temporary.buf)) {
 		error_errno(_("unable to create cloud ODB staging directory"));
 		goto out;
@@ -1182,6 +1241,7 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->prefix = (struct strbuf)STRBUF_INIT;
 	source->manifest_key = (struct strbuf)STRBUF_INIT;
 	odb_source_init(&source->base, odb, ODB_SOURCE_CLOUD, path, local);
+	cloud_cleanup_staging(path);
 	if (s3_client_init_from_env(&source->client))
 		die(_("unable to configure cloud ODB at '%s'"), path);
 	s3_client_storage_id(&source->client, &storage_id);

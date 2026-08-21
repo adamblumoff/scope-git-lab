@@ -37,9 +37,11 @@ deadline and socket inactivity timeout, 1 GiB per request, and 1 GiB total
 buffered request data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
 `CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS`, `CLOUD_BENCH_MAX_REQUEST_BYTES`, and
 `CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES`. Receive-pack status responses are
-spooled up to 16 MiB so a crashed backend can return a terminal HTTP error;
-override that bound with `CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES`. Admission
-fails with HTTP 503 when a server-wide limit is full.
+spooled up to 16 MiB so an early backend crash can return a terminal HTTP error.
+Larger successful responses switch to streaming rather than reporting a failed
+push after refs have committed. Override the spool threshold with
+`CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES`. Admission fails with HTTP 503 when a
+server-wide limit is full.
 
 `/results/latest.json` accepts results up to 64 MiB by default; override the
 bound with `CLOUD_BENCH_MAX_RESULT_BYTES`. Remote failure injection is disabled

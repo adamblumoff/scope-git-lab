@@ -824,6 +824,7 @@ static int fsck_generic_object(const struct object_id *oid,
 
 static void fsck_source(struct repository *repo, struct odb_source *source)
 {
+	struct odb_source_files *files;
 	struct progress *progress = NULL;
 	struct for_each_loose_cb cb_data = {
 		.repo = source->odb->repo,
@@ -846,7 +847,10 @@ static void fsck_source(struct repository *repo, struct odb_source *source)
 			errors_found |= ERROR_OBJECT;
 			error(_("unable to enumerate generic ODB source"));
 		}
-		return;
+		files = odb_source_files_try_delegate(source);
+		if (!files)
+			return;
+		source = &files->base;
 	}
 
 	if (show_progress)
