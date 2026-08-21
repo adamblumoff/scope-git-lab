@@ -15,6 +15,11 @@ void test_cloud_manifest__round_trip(void)
 		"run/objects/one.gsg", 123, "run/objects/one.gsi", 45));
 	cl_must_pass(odb_cloud_manifest_add(&original,
 		"run/objects/two.gsg", 678, "run/objects/two.gsi", 90));
+	original.gc_token = xstrdup("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+	cl_must_pass(odb_cloud_manifest_add_pending(
+		&original, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 123456,
+		ODB_CLOUD_PENDING_ACTIVE, "run/objects/pending.gsg", 12,
+		"run/objects/pending.gsi", 34));
 	odb_cloud_manifest_write(&original, &serialized);
 	cl_must_pass(odb_cloud_manifest_parse(&parsed, serialized.buf,
 		serialized.len, hash_algo));
@@ -23,6 +28,15 @@ void test_cloud_manifest__round_trip(void)
 	cl_assert_equal_s(parsed.artifacts[1].data_key,
 			  "run/objects/two.gsg");
 	cl_assert_equal_u(parsed.artifacts[1].index_bytes, 90);
+	cl_assert_equal_s(parsed.gc_token, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+	cl_assert_equal_u(parsed.pending_nr, 1);
+	cl_assert_equal_s(parsed.pending[0].token,
+			  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+	cl_assert_equal_u(parsed.pending[0].created_at, 123456);
+	cl_assert_equal_i(parsed.pending[0].state, ODB_CLOUD_PENDING_ACTIVE);
+	cl_must_pass(odb_cloud_manifest_remove_pending(
+		&parsed, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+	cl_assert_equal_u(parsed.pending_nr, 0);
 	odb_cloud_manifest_release(&parsed);
 	odb_cloud_manifest_release(&original);
 	strbuf_release(&serialized);

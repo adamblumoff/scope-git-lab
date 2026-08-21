@@ -3,6 +3,14 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+source_root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
+if test -x "$source_root/git" && test -x "$source_root/git-cloud-bench"
+then
+	PATH=$source_root:$PATH
+	GIT_EXEC_PATH=$source_root
+	GIT_TEMPLATE_DIR=$source_root/templates/blt
+	export PATH GIT_EXEC_PATH GIT_TEMPLATE_DIR
+fi
 trash=$(mktemp -d "${TMPDIR:-/tmp}/cloud-bench-http.XXXXXX")
 server_pid=
 
@@ -118,6 +126,19 @@ test "$partial_status" = 2
 grep "partial AWS S3 environment" "$trash/partial-s3.log" >/dev/null
 test ! -e "$trash/partial-repos/bench.git"
 
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/invalid-budget-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/invalid-budget-results \
+CLOUD_BENCH_CLOUD_ODB=0 \
+CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES=7 \
+CLOUD_BENCH_CLOUD_METADATA_RESERVATION_BYTES=8 \
+PORT=$port \
+	"$script_dir/cloud-bench" serve >"$trash/invalid-budget.log" 2>&1
+budget_status=$?
+set -e
+test "$budget_status" -ne 0
+grep "must cover one metadata reservation" "$trash/invalid-budget.log" >/dev/null
+
 expect_invalid_s3 () {
 	label=$1
 	endpoint=$2
@@ -150,6 +171,7 @@ expect_invalid_s3 uppercase-bucket https://example.invalid Invalid-bucket path
 expect_invalid_s3 leading-hyphen https://example.invalid -invalid path
 expect_invalid_s3 trailing-hyphen https://example.invalid invalid- path
 expect_invalid_s3 adjacent-periods https://example.invalid invalid..bucket path
+expect_invalid_s3 dotted-virtual https://example.invalid valid.bucket virtual-hosted
 expect_invalid_s3 ip-address https://example.invalid 192.168.5.4 path
 expect_invalid_s3 reserved-prefix https://example.invalid xn--invalid path
 expect_invalid_s3 reserved-suffix https://example.invalid invalid--x-s3 path
@@ -297,6 +319,8 @@ CLOUD_BENCH_ALLOW_PUSH=0 \
 CLOUD_BENCH_CLOUD_ODB=0 \
 CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES=8 \
 CLOUD_BENCH_MAX_CONCURRENT_REQUESTS=2 \
+CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES=16 \
+CLOUD_BENCH_CLOUD_METADATA_RESERVATION_BYTES=8 \
 CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS=1 \
 CLOUD_BENCH_MAX_RESULT_BYTES=8 \
 PORT=$port \

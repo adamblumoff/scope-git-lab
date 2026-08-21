@@ -18,7 +18,14 @@ void odb_cloud_manifest_release(struct odb_cloud_manifest *manifest)
 		free(manifest->artifacts[i].data_key);
 		free(manifest->artifacts[i].index_key);
 	}
+	for (size_t i = 0; i < manifest->pending_nr; i++) {
+		free(manifest->pending[i].token);
+		free(manifest->pending[i].data_key);
+		free(manifest->pending[i].index_key);
+	}
+	free(manifest->gc_token);
 	free(manifest->artifacts);
+	free(manifest->pending);
 	*manifest = (struct odb_cloud_manifest)ODB_CLOUD_MANIFEST_INIT;
 }
 
@@ -30,6 +37,18 @@ static int valid_key(const char *key)
 		return 0;
 	for (; *p; p++)
 		if (isspace(*p) || iscntrl(*p))
+			return 0;
+	return 1;
+}
+
+static int valid_token(const char *token)
+{
+	const unsigned char *p = (const unsigned char *)token;
+
+	if (strlen(token) != 32)
+		return 0;
+	for (; *p; p++)
+		if (!isxdigit(*p))
 			return 0;
 	return 1;
 }
@@ -51,6 +70,61 @@ int odb_cloud_manifest_add(struct odb_cloud_manifest *manifest,
 	artifact->data_bytes = data_bytes;
 	artifact->index_bytes = index_bytes;
 	return 0;
+}
+
+struct odb_cloud_pending_artifact *odb_cloud_manifest_find_pending(
+	struct odb_cloud_manifest *manifest, const char *token)
+{
+	for (size_t i = 0; i < manifest->pending_nr; i++)
+		if (!strcmp(manifest->pending[i].token, token))
+			return &manifest->pending[i];
+	return NULL;
+}
+
+int odb_cloud_manifest_add_pending(
+	struct odb_cloud_manifest *manifest, const char *token,
+	uint64_t created_at, enum odb_cloud_pending_state state,
+	const char *data_key, uint64_t data_bytes,
+	const char *index_key, uint64_t index_bytes)
+{
+	struct odb_cloud_pending_artifact *pending;
+
+	if (!valid_token(token) || !created_at ||
+	    (state != ODB_CLOUD_PENDING_ACTIVE &&
+	     state != ODB_CLOUD_PENDING_DELETING) ||
+	    !valid_key(data_key) || !valid_key(index_key) ||
+	    !data_bytes || !index_bytes ||
+	    odb_cloud_manifest_find_pending(manifest, token))
+		return error(_("cloud ODB manifest has an invalid pending artifact"));
+	ALLOC_GROW(manifest->pending, manifest->pending_nr + 1,
+		   manifest->pending_alloc);
+	pending = &manifest->pending[manifest->pending_nr++];
+	pending->token = xstrdup(token);
+	pending->created_at = created_at;
+	pending->state = state;
+	pending->data_key = xstrdup(data_key);
+	pending->data_bytes = data_bytes;
+	pending->index_key = xstrdup(index_key);
+	pending->index_bytes = index_bytes;
+	return 0;
+}
+
+int odb_cloud_manifest_remove_pending(struct odb_cloud_manifest *manifest,
+				      const char *token)
+{
+	for (size_t i = 0; i < manifest->pending_nr; i++) {
+		struct odb_cloud_pending_artifact *pending = &manifest->pending[i];
+
+		if (strcmp(pending->token, token))
+			continue;
+		free(pending->token);
+		free(pending->data_key);
+		free(pending->index_key);
+		MOVE_ARRAY(pending, pending + 1, manifest->pending_nr - i - 1);
+		manifest->pending_nr--;
+		return 0;
+	}
+	return 1;
 }
 
 static int parse_u64(const char *value, uint64_t *out)
@@ -100,17 +174,45 @@ int odb_cloud_manifest_parse(struct odb_cloud_manifest *manifest,
 	odb_cloud_manifest_init(manifest, expected_hash_algo);
 	manifest->generation = generation;
 	for (size_t i = 4; i < lines.nr; i++) {
-		uint64_t data_bytes, index_bytes;
+		uint64_t data_bytes, index_bytes, created_at;
 
 		string_list_clear(&fields, 0);
 		string_list_split(&fields, lines.items[i].string, " ", -1);
-		if (fields.nr != 5 || strcmp(fields.items[0].string, "artifact") ||
-		    parse_u64(fields.items[2].string, &data_bytes) ||
-		    parse_u64(fields.items[4].string, &index_bytes) ||
-		    odb_cloud_manifest_add(manifest, fields.items[1].string,
-					   data_bytes, fields.items[3].string,
-					   index_bytes))
+		if (fields.nr == 2 && !strcmp(fields.items[0].string, "gc")) {
+			if (manifest->gc_token ||
+			    !valid_token(fields.items[1].string))
+				goto invalid;
+			manifest->gc_token = xstrdup(fields.items[1].string);
+		} else if (fields.nr == 5 &&
+			   !strcmp(fields.items[0].string, "artifact")) {
+			if (parse_u64(fields.items[2].string, &data_bytes) ||
+			    parse_u64(fields.items[4].string, &index_bytes) ||
+			    odb_cloud_manifest_add(manifest, fields.items[1].string,
+						   data_bytes,
+						   fields.items[3].string,
+						   index_bytes))
+				goto invalid;
+		} else if (fields.nr == 8 &&
+			   !strcmp(fields.items[0].string, "pending")) {
+			enum odb_cloud_pending_state state;
+
+			if (!strcmp(fields.items[3].string, "active"))
+				state = ODB_CLOUD_PENDING_ACTIVE;
+			else if (!strcmp(fields.items[3].string, "deleting"))
+				state = ODB_CLOUD_PENDING_DELETING;
+			else
+				goto invalid;
+			if (parse_u64(fields.items[2].string, &created_at) ||
+			    parse_u64(fields.items[5].string, &data_bytes) ||
+			    parse_u64(fields.items[7].string, &index_bytes) ||
+			    odb_cloud_manifest_add_pending(
+				    manifest, fields.items[1].string, created_at, state,
+				    fields.items[4].string, data_bytes,
+				    fields.items[6].string, index_bytes))
+				goto invalid;
+		} else {
 			goto invalid;
+		}
 	}
 	ret = 0;
 	goto out;
@@ -138,5 +240,19 @@ void odb_cloud_manifest_write(const struct odb_cloud_manifest *manifest,
 		strbuf_addf(out, "artifact %s %"PRIu64" %s %"PRIu64"\n",
 			    artifact->data_key, artifact->data_bytes,
 			    artifact->index_key, artifact->index_bytes);
+	}
+	if (manifest->gc_token)
+		strbuf_addf(out, "gc %s\n", manifest->gc_token);
+	for (size_t i = 0; i < manifest->pending_nr; i++) {
+		const struct odb_cloud_pending_artifact *pending =
+			&manifest->pending[i];
+
+		strbuf_addf(out,
+			    "pending %s %"PRIu64" %s %s %"PRIu64" %s %"PRIu64"\n",
+			    pending->token, pending->created_at,
+			    pending->state == ODB_CLOUD_PENDING_ACTIVE ?
+				    "active" : "deleting",
+			    pending->data_key, pending->data_bytes,
+			    pending->index_key, pending->index_bytes);
 	}
 }

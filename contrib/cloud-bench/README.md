@@ -31,12 +31,26 @@ than 1,024 artifacts, and more than 64 MiB of aggregate index metadata. Those ex
 keep publication metadata and read streams bounded until the group codec gains
 incremental object compression and inflation. Bounded direct writes use the
 same publication path so objects created by receive hooks remain available.
+Before uploading, each writer records its immutable keys in a conditional
+manifest update. Recovery first marks expired records while holding a manifest
+GC lease, which blocks new registrations but lets current writers publish. It
+then deletes only keys unreachable from committed artifacts or active records
+and clears the lease in a final conditional update. The remote journal survives
+process, container, and host loss. Active records receive a one-hour safety
+window before recovery; local staging cleanup is only a disk-space optimization.
+Independent replicas remain unsupported because refs are local.
 
-The bridge defaults to 64 concurrent requests, a 30-second total request-input
-deadline and socket inactivity timeout, 1 GiB per request, and 1 GiB total
-buffered request data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
+The bridge accepts at most 64 concurrent requests, further capped by a 512 MiB
+service-wide cloud-metadata budget with a conservative 256 MiB reservation per
+Git backend. It also defaults to a 30-second total request-input deadline and
+socket inactivity timeout, 1 GiB per request, and 1 GiB total buffered request
+data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
+`CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES`,
+`CLOUD_BENCH_CLOUD_METADATA_RESERVATION_BYTES`,
 `CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS`, `CLOUD_BENCH_MAX_REQUEST_BYTES`, and
-`CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES`. Receive-pack status responses are
+`CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES`. Raise the metadata budget only for an
+isolated high-concurrency matrix after sizing the service memory. Receive-pack
+status responses are
 spooled up to 16 MiB so an early backend crash can return a terminal HTTP error.
 Larger successful responses switch to streaming rather than reporting a failed
 push after refs have committed. Override the spool threshold with

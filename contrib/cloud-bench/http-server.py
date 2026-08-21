@@ -44,6 +44,14 @@ MAX_RESULT_BYTES = int(
 MAX_CONCURRENT_REQUESTS = int(
     os.environ.get("CLOUD_BENCH_MAX_CONCURRENT_REQUESTS", "64")
 )
+MAX_CLOUD_METADATA_BYTES = int(
+    os.environ.get("CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES", str(512 * 1024 * 1024))
+)
+CLOUD_METADATA_RESERVATION_BYTES = int(
+    os.environ.get(
+        "CLOUD_BENCH_CLOUD_METADATA_RESERVATION_BYTES", str(256 * 1024 * 1024)
+    )
+)
 REQUEST_TIMEOUT_SECONDS = float(
     os.environ.get("CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS", "30")
 )
@@ -55,10 +63,19 @@ if min(
     MAX_RECEIVE_RESPONSE_BYTES,
     MAX_RESULT_BYTES,
     MAX_CONCURRENT_REQUESTS,
+    MAX_CLOUD_METADATA_BYTES,
+    CLOUD_METADATA_RESERVATION_BYTES,
 ) <= 0:
     raise ValueError("request limits must be positive")
 if REQUEST_TIMEOUT_SECONDS <= 0:
     raise ValueError("request timeout must be positive")
+
+METADATA_REQUEST_SLOTS = MAX_CLOUD_METADATA_BYTES // CLOUD_METADATA_RESERVATION_BYTES
+if METADATA_REQUEST_SLOTS <= 0:
+    raise ValueError(
+        "CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES must cover one metadata reservation"
+    )
+EFFECTIVE_CONCURRENT_REQUESTS = min(MAX_CONCURRENT_REQUESTS, METADATA_REQUEST_SLOTS)
 
 
 class GitHandler(BaseHTTPRequestHandler):
@@ -465,7 +482,9 @@ class GitHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address, handler_class):
         super().__init__(server_address, handler_class)
-        self._request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        self._request_slots = threading.BoundedSemaphore(
+            EFFECTIVE_CONCURRENT_REQUESTS
+        )
         self._body_bytes = 0
         self._body_lock = threading.Lock()
 

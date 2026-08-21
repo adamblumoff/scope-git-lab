@@ -55,15 +55,25 @@ git -C "$bare" repack -ad
 
 printf 'failpoint staging\n' >>"$client/object"
 git -C "$client" commit --quiet -am failpoint-staging
+orphan_metrics=$trash/orphan-metrics.jsonl
+orphan_run=11111111111111111111111111111111
 set +e
-GIT_TEST_CLOUD_ODB_FAILPOINT=before-artifact-upload \
+GIT_CLOUD_ODB_METRICS_PATH=$orphan_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$orphan_run \
+GIT_TEST_CLOUD_ODB_FAILPOINT=after-artifact-upload \
 	git -C "$client" push --quiet "$bare" HEAD:main
 failpoint_status=$?
 set -e
 test "$failpoint_status" -ne 0
 set -- "$bare"/objects/cloud-write-*
 test -d "$1"
-git -C "$bare" cat-file -e "$fallback_oid^{commit}"
+rm "$1/data.gsg" "$1/index.gsi"
+rmdir "$1"
+GIT_CLOUD_ODB_METRICS_PATH=$orphan_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$orphan_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cat-file -e "$fallback_oid^{commit}"
+test "$(grep -c '"method":"DELETE"' "$orphan_metrics")" -ge 2
 for staging in "$bare"/objects/cloud-write-*
 do
 	test ! -e "$staging"

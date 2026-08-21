@@ -547,6 +547,9 @@ int s3_client_init_from_env(struct s3_client *client)
 		return error(_("invalid S3 bucket name"));
 	if (!valid_url_style(url_style))
 		return error(_("unsupported AWS_S3_URL_STYLE value"));
+	if (virtual_url_style(url_style) && strchr(bucket, '.'))
+		return error(_("virtual-hosted HTTPS does not support dotted S3 "
+			       "bucket names; use path style"));
 	if (!skip_iprefix(endpoint, "https://", &unused) &&
 	    !(git_env_bool("GIT_TEST_S3_ALLOW_HTTP", 0) &&
 	      skip_iprefix(endpoint, "http://", &unused)))
@@ -1246,5 +1249,5 @@ int s3_client_delete(struct s3_client *client, const char *key,
 		     struct s3_response *response)
 {
 	return s3_request(client, key, S3_REQUEST_DELETE, NULL, 0,
-			  NULL, 0, NULL, SIZE_MAX, response);
+			  NULL, 0, NULL, S3_MAX_WRITE_RESPONSE_BYTES, response);
 }
