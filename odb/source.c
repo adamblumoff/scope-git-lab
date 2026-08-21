@@ -21,7 +21,8 @@ struct odb_source *odb_source_new(struct object_database *odb,
 #ifdef USE_S3
 	if (file_exists(marker.buf)) {
 		source = &odb_source_cloud_new(odb, path, local)->base;
-		goto out;
+		strbuf_release(&marker);
+		return source;
 	}
 #else
 	if (file_exists(marker.buf))
@@ -33,7 +34,6 @@ struct odb_source *odb_source_new(struct object_database *odb,
 		source = &odb_source_segment_new(odb, path, local)->base;
 	else
 		source = &odb_source_files_new(odb, path, local)->base;
-out:
 	strbuf_release(&marker);
 
 	return source;

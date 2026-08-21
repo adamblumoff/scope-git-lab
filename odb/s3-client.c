@@ -531,6 +531,7 @@ int s3_client_init_from_env(struct s3_client *client)
 	const char *endpoint = required_env("AWS_ENDPOINT_URL");
 	const char *access_key = required_env("AWS_ACCESS_KEY_ID");
 	const char *secret_key = required_env("AWS_SECRET_ACCESS_KEY");
+	const char *session_token = getenv("AWS_SESSION_TOKEN");
 	const char *bucket = required_env("AWS_S3_BUCKET_NAME");
 	const char *region = required_env("AWS_DEFAULT_REGION");
 	const char *url_style = required_env("AWS_S3_URL_STYLE");
@@ -557,6 +558,8 @@ int s3_client_init_from_env(struct s3_client *client)
 	client->endpoint = xstrdup(endpoint);
 	client->access_key = xstrdup(access_key);
 	client->secret_key = xstrdup(secret_key);
+	client->session_token = session_token && *session_token ?
+		xstrdup(session_token) : NULL;
 	client->bucket = xstrdup(bucket);
 	client->region = xstrdup(region);
 	client->url_style = xstrdup(url_style);
@@ -622,6 +625,7 @@ void s3_client_release(struct s3_client *client)
 	free(client->http_version);
 	free(client->access_key);
 	free_sensitive(&client->secret_key);
+	free_sensitive(&client->session_token);
 	free(client->bucket);
 	free(client->region);
 	free(client->url_style);
@@ -964,6 +968,17 @@ static int s3_request(struct s3_client *client, const char *key,
 			   append_header(&headers, "If-None-Match: *")) {
 			goto out;
 		}
+	}
+	if (client->session_token) {
+		if (!valid_condition(client->session_token)) {
+			error(_("invalid AWS_SESSION_TOKEN value"));
+			goto out;
+		}
+		strbuf_reset(&header);
+		strbuf_addf(&header, "x-amz-security-token: %s",
+			    client->session_token);
+		if (append_header(&headers, header.buf))
+			goto out;
 	}
 
 	s3_response_reset(response);

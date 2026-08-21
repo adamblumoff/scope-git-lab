@@ -45,6 +45,12 @@ struct cloud_stream {
 	size_t offset;
 };
 
+struct cloud_lookup_entry {
+	struct oidmap_entry ent;
+	size_t reader_nr;
+	size_t entry_nr;
+};
+
 static const char *metrics_run_id(void)
 {
 	const unsigned char *value =
@@ -181,7 +187,31 @@ static void cloud_clear_readers(struct odb_source_cloud *source)
 	free(source->groups);
 	source->groups = NULL;
 	source->readers_nr = 0;
+	source->cached_reader_nr = SIZE_MAX;
+	oidmap_clear(&source->object_index, 1);
 	odb_cloud_manifest_release(&source->manifest);
+}
+
+static void cloud_rebuild_object_index(struct odb_source_cloud *source)
+{
+	struct oidmap replacement = OIDMAP_INIT;
+
+	for (size_t reader_nr = 0; reader_nr < source->readers_nr; reader_nr++) {
+		struct odb_segment_group *group = &source->groups[reader_nr];
+
+		for (size_t entry_nr = 0; entry_nr < group->entries_nr; entry_nr++) {
+			struct cloud_lookup_entry *entry, *replaced;
+
+			CALLOC_ARRAY(entry, 1);
+			oidcpy(&entry->ent.oid, &group->entries[entry_nr].oid);
+			entry->reader_nr = reader_nr;
+			entry->entry_nr = entry_nr;
+			replaced = oidmap_put(&replacement, entry);
+			free(replaced);
+		}
+	}
+	oidmap_clear(&source->object_index, 1);
+	source->object_index = replacement;
 }
 
 static int cloud_get_manifest(struct odb_source_cloud *source,
@@ -324,6 +354,8 @@ static int cloud_load(struct odb_source_cloud *source)
 			goto out;
 		source->readers_nr++;
 	}
+	if (source->readers_nr != old_readers)
+		cloud_rebuild_object_index(source);
 	ret = 0;
 out:
 	if (fetched) {
@@ -338,29 +370,25 @@ out:
 
 static int cloud_lookup_segment(struct odb_source_cloud *source,
 				const struct object_id *oid, size_t *reader_nr,
-				const void **entry)
+				const struct odb_segment_group_entry **entry)
 {
-	size_t i = source->readers_nr;
+	struct cloud_lookup_entry *found = oidmap_get(&source->object_index, oid);
 
-	while (i--) {
-		int ret = odb_segment_group_lookup(
-			&source->groups[i], oid,
-			(const struct odb_segment_group_entry **)entry);
-		if (ret < 0)
-			return -1;
-		if (!ret) {
-			*reader_nr = i;
-			return 0;
-		}
-	}
-	return 1;
+	if (!found)
+		return 1;
+	if (found->reader_nr >= source->readers_nr ||
+	    found->entry_nr >= source->groups[found->reader_nr].entries_nr)
+		BUG("cloud ODB object index points outside its readers");
+	*reader_nr = found->reader_nr;
+	*entry = &source->groups[found->reader_nr].entries[found->entry_nr];
+	return 0;
 }
 
 static int cloud_read_data(struct odb_source_cloud *source,
 			   const struct object_id *oid, enum object_type *type,
 			   size_t *size, size_t *disk_size, void **data)
 {
-	const void *entry;
+	const struct odb_segment_group_entry *entry;
 	size_t nr;
 	int group_cache_hit = 0;
 	int ret = cloud_lookup_segment(source, oid, &nr, &entry);
@@ -368,17 +396,22 @@ static int cloud_read_data(struct odb_source_cloud *source,
 	if (ret)
 		return ret;
 	{
-		const struct odb_segment_group_entry *e = entry;
 		const struct odb_segment_group_info *group =
-			&source->groups[nr].groups[e->group_nr];
+			&source->groups[nr].groups[entry->group_nr];
 
-		*type = e->type;
-		*size = e->size;
+		*type = entry->type;
+		*size = entry->size;
 		*disk_size = group->compressed_size;
 		if (data) {
-			group_cache_hit = source->groups[nr].cached_group_nr == e->group_nr;
-			if (odb_segment_group_read(&source->groups[nr], e, data))
+			group_cache_hit = source->cached_reader_nr == nr &&
+				source->groups[nr].cached_group_nr == entry->group_nr;
+			if (source->cached_reader_nr != SIZE_MAX &&
+			    source->cached_reader_nr != nr)
+				odb_segment_group_clear_cache(
+					&source->groups[source->cached_reader_nr]);
+			if (odb_segment_group_read(&source->groups[nr], entry, data))
 				return -1;
+			source->cached_reader_nr = nr;
 		}
 	}
 	if (data) {
@@ -886,17 +919,17 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 			     &index_bytes))
 		goto out;
 	cloud_failpoint("after-artifact-upload");
+	if (repo_migrate_loose_object_map(incoming_files->loose,
+					 source->fallback->loose)) {
+		error(_("unable to retain compatibility object mappings"));
+		goto out;
+	}
 	if (publish_artifact(source, data_key.buf, data_bytes, index_key.buf,
 			     index_bytes))
 		goto out;
 	cloud_failpoint("after-cas");
 	if (cloud_load(source))
 		goto out;
-	if (repo_migrate_loose_object_map(incoming_files->loose,
-					 source->fallback->loose)) {
-		error(_("unable to retain compatibility object mappings"));
-		goto out;
-	}
 	ret = 0;
 
 discard:
@@ -1115,6 +1148,7 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	strbuf_release(&segment_manifest);
 
 	CALLOC_ARRAY(source, 1);
+	source->cached_reader_nr = SIZE_MAX;
 	source->prefix = (struct strbuf)STRBUF_INIT;
 	source->manifest_key = (struct strbuf)STRBUF_INIT;
 	odb_source_init(&source->base, odb, ODB_SOURCE_CLOUD, path, local);

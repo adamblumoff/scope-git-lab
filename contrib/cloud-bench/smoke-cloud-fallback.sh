@@ -25,10 +25,22 @@ printf 'fallback\n' >"$client/object"
 git -C "$client" add object
 git -C "$client" commit --quiet -m fallback
 git -C "$client" push --quiet "$bare" HEAD:main
+git -C "$bare" repack -ad
 
 fallback_oid=$(git -C "$client" rev-parse HEAD)
 printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' "$prefix" \
 	>"$bare/objects/cloud-odb"
+
+git -C "$bare" commit-graph write
+test -f "$bare/objects/info/commit-graph"
+set +e
+printf 'done\n' | git -C "$bare" fast-import \
+	>"$trash/fast-import.out" 2>"$trash/fast-import.err"
+fast_import_status=$?
+set -e
+test "$fast_import_status" -ne 0
+grep "fast-import is not supported with a cloud ODB" \
+	"$trash/fast-import.err" >/dev/null
 
 git -C "$bare" cat-file --batch-all-objects \
 	--batch-check='%(objectname)' >"$trash/fallback-enumerated"
@@ -38,6 +50,9 @@ git -C "$bare" gc
 
 printf 'cloud\n' >>"$client/object"
 git -C "$client" commit --quiet -am cloud
+git -C "$client" push --quiet "$bare" HEAD:main
+printf 'second cloud artifact\n' >>"$client/object"
+git -C "$client" commit --quiet -am second-cloud-artifact
 git -C "$client" push --quiet "$bare" HEAD:main
 
 git -C "$bare" rev-list --objects --all |

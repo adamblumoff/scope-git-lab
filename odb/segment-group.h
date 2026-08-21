@@ -80,6 +80,7 @@ int odb_segment_group_open_reader(struct odb_segment_group *segment,
 				  odb_range_release_fn *range_release,
 				  void *range_data);
 void odb_segment_group_close(struct odb_segment_group *segment);
+void odb_segment_group_clear_cache(struct odb_segment_group *segment);
 
 /* Return 0 when found and 1 when absent. */
 int odb_segment_group_lookup(const struct odb_segment_group *segment,

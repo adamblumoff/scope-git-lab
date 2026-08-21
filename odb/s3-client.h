@@ -23,6 +23,7 @@ struct s3_client {
 	char *http_version;
 	char *access_key;
 	char *secret_key;
+	char *session_token;
 	char *bucket;
 	char *region;
 	char *url_style;

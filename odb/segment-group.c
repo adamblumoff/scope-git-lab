@@ -424,8 +424,14 @@ void odb_segment_group_close(struct odb_segment_group *segment)
 	free(segment->data_path);
 	free(segment->entries);
 	free(segment->groups);
-	free(segment->cached_group);
+	odb_segment_group_clear_cache(segment);
 	*segment = (struct odb_segment_group)ODB_SEGMENT_GROUP_INIT;
+}
+
+void odb_segment_group_clear_cache(struct odb_segment_group *segment)
+{
+	FREE_AND_NULL(segment->cached_group);
+	segment->cached_group_nr = SIZE_MAX;
 }
 
 int odb_segment_group_lookup(const struct odb_segment_group *segment,

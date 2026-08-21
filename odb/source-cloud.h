@@ -4,6 +4,7 @@
 #include "odb/cloud-manifest.h"
 #include "odb/source.h"
 #include "odb/s3-client.h"
+#include "oidmap.h"
 
 struct odb_segment_group;
 struct odb_source_files;
@@ -13,6 +14,8 @@ struct odb_source_cloud {
 	struct odb_source_files *fallback;
 	struct odb_segment_group *groups;
 	size_t readers_nr;
+	size_t cached_reader_nr;
+	struct oidmap object_index;
 	struct odb_cloud_manifest manifest;
 	struct s3_client client;
 	struct strbuf prefix;

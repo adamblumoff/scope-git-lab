@@ -30,6 +30,7 @@ CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=1 \
 CLOUD_BENCH_CLOUD_ODB=0 \
 CLOUD_BENCH_LATEST_RESULT=$script_dir/results/railway-cloud-odb-matrix-2026-08-20.json \
+AWS_SESSION_TOKEN=session-token-smoke \
 PORT=$port \
 	"$script_dir/cloud-bench" serve >"$trash/server.log" 2>&1 &
 server_pid=$!
@@ -66,6 +67,7 @@ git -C "$trash/client" config user.name "Cloud Bench"
 git -C "$trash/client" config user.email "cloud-bench@example.com"
 printf '%s\n' \
 	'#!/bin/sh' \
+	'test "$AWS_SESSION_TOKEN" = session-token-smoke || exit 1' \
 	'test -n "$GIT_CLOUD_ODB_METRICS_RUN" || exit 0' \
 	'printf "%s\\n" "$GIT_CLOUD_ODB_METRICS_RUN" >"$GIT_DIR/metrics-run"' \
 	>"$trash/repos/bench.git/hooks/post-receive"

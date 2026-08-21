@@ -99,6 +99,10 @@ void test_segment_group__round_trip_and_group_boundaries(void)
 		cl_assert_equal_s(data, contents[i]);
 		free(data);
 	}
+	cl_assert(segment.cached_group != NULL);
+	odb_segment_group_clear_cache(&segment);
+	cl_assert(segment.cached_group == NULL);
+	cl_assert_equal_u(segment.cached_group_nr, SIZE_MAX);
 	odb_segment_group_close(&segment);
 	strbuf_release(&data_path);
 	strbuf_release(&index_path);
