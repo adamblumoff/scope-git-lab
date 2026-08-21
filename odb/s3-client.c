@@ -132,14 +132,16 @@ static void append_request_metric(enum s3_request_method method,
 		    "\"status\":%ld,\"requests\":1,"
 		    "\"transportFailures\":%d,\"transportError\":%d,"
 		    "\"gets\":%d,"
-		    "\"heads\":%d,\"puts\":%d,\"rangeRequests\":%d,"
+		    "\"heads\":%d,\"puts\":%d,\"deletes\":%d,"
+		    "\"rangeRequests\":%d,"
 		    "\"rangeRequestedBytes\":%"PRIu64","
 		    "\"uploadedBytes\":%"PRIu64","
 		    "\"downloadedBytes\":%"PRIu64",\"conflicts\":%d}\n",
 		    method_name(method), response->http_status,
 		    curl_result != CURLE_OK, (int)curl_result,
 		    method == S3_REQUEST_GET, method == S3_REQUEST_HEAD,
-		    method == S3_REQUEST_PUT, !!range, requested,
+		    method == S3_REQUEST_PUT, method == S3_REQUEST_DELETE,
+		    !!range, requested,
 		    response->uploaded_bytes, response->downloaded_bytes,
 		    response->http_status == 409 || response->http_status == 412);
 	s3_metrics_append(&line);

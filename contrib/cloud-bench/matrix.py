@@ -446,6 +446,7 @@ def summarize_metrics(records):
         "gets",
         "heads",
         "puts",
+        "deletes",
         "rangeRequests",
         "rangeRequestedBytes",
         "uploadedBytes",

@@ -612,11 +612,13 @@ with tempfile.TemporaryDirectory() as directory:
 	run_one = "1" * 32
 	run_two = "2" * 32
 	metrics.write_text(
-		'{"runId":"' + run_one + '","puts":1}\n'
+		'{"runId":"' + run_one + '","puts":1,"deletes":2}\n'
 		'{"runId":"' + run_two + '","puts":50}\n'
 	)
 	cursor = matrix.MetricsCursor(metrics, run_one)
-	assert matrix.summarize_metrics(cursor.read(0))["puts"] == 1
+	summary = matrix.summarize_metrics(cursor.read(0))
+	assert summary["puts"] == 1
+	assert summary["deletes"] == 2
 	assert cursor.is_truncated() is False
 	pathlib.Path(f"{metrics}.truncated").touch()
 	assert cursor.is_truncated() is True

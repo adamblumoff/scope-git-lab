@@ -1,9 +1,9 @@
 #include "git-compat-util.h"
+#include "config.h"
 #include "dir.h"
 #include "gettext.h"
 #include "hash.h"
 #include "hex.h"
-#include "list-objects.h"
 #include "loose.h"
 #include "object-file.h"
 #include "odb/cloud-manifest.h"
@@ -12,10 +12,8 @@
 #include "odb/source-files.h"
 #include "odb/streaming.h"
 #include "oidset.h"
-#include "parse.h"
 #include "refs.h"
 #include "repository.h"
-#include "revision.h"
 #include "strbuf.h"
 #include "string-list.h"
 #include "strvec.h"
@@ -1126,97 +1124,60 @@ static int manifest_protects_key(const struct odb_cloud_manifest *manifest,
 	return 0;
 }
 
-struct cloud_reachability_data {
-	struct repository *repo;
-	struct rev_info *revs;
+struct cloud_reference_data {
 	struct ref_store *refs;
+	struct oidset *oids;
 };
 
-static int add_reachable_tip(struct cloud_reachability_data *data,
+static int add_reference_tip(struct cloud_reference_data *data,
 			     const struct object_id *oid)
 {
-	struct object *object;
-
 	if (is_null_oid(oid))
 		return 0;
-	object = parse_object(data->repo, oid);
-	if (!object)
-		return error(_("unable to read ref target for cloud ODB recovery"));
-	add_pending_object(data->revs, object, "");
+	oidset_insert(data->oids, oid);
 	return 0;
 }
 
-static int add_reachable_ref(const struct reference *ref, void *cb_data)
+static int add_reference_ref(const struct reference *ref, void *cb_data)
 {
-	return add_reachable_tip(cb_data, ref->oid);
+	return add_reference_tip(cb_data, ref->oid);
 }
 
-static int add_reachable_reflog_oid(
+static int add_reference_reflog_oid(
 	const char *refname UNUSED, struct object_id *old_oid,
 	struct object_id *new_oid, const char *committer UNUSED,
 	timestamp_t timestamp UNUSED, int tz UNUSED,
 	const char *msg UNUSED, void *cb_data)
 {
-	struct cloud_reachability_data *data = cb_data;
+	struct cloud_reference_data *data = cb_data;
 
-	return add_reachable_tip(data, old_oid) ||
-		add_reachable_tip(data, new_oid);
+	return add_reference_tip(data, old_oid) ||
+		add_reference_tip(data, new_oid);
 }
 
-static int add_reachable_reflog(const char *refname, void *cb_data)
+static int add_reference_reflog(const char *refname, void *cb_data)
 {
-	struct cloud_reachability_data *data = cb_data;
+	struct cloud_reference_data *data = cb_data;
 
 	return refs_for_each_reflog_ent(data->refs, refname,
-					add_reachable_reflog_oid, data);
+					add_reference_reflog_oid, data);
 }
 
-static void collect_reachable_commit(struct commit *commit, void *cb_data)
+static int collect_reference_tips(struct odb_source_cloud *source,
+				  struct oidset *oids)
 {
-	struct oidset *oids = cb_data;
-
-	oidset_insert(oids, &commit->object.oid);
-}
-
-static void collect_reachable_object(struct object *object,
-				     const char *name UNUSED, void *cb_data)
-{
-	struct oidset *oids = cb_data;
-
-	oidset_insert(oids, &object->oid);
-}
-
-static int collect_reachable_objects(struct odb_source_cloud *source,
-				     struct oidset *oids)
-{
-	struct rev_info revs;
-	struct cloud_reachability_data data = {
-		.repo = source->base.odb->repo,
-		.revs = &revs,
+	struct cloud_reference_data data = {
+		.refs = get_main_ref_store(source->base.odb->repo),
+		.oids = oids,
 	};
-	int ret = -1;
 
-	repo_init_revisions(data.repo, &revs, NULL);
-	data.refs = get_main_ref_store(data.repo);
-	revs.tag_objects = 1;
-	revs.tree_objects = 1;
-	revs.blob_objects = 1;
-	if (refs_for_each_ref(data.refs, add_reachable_ref, &data) ||
-	    refs_head_ref(data.refs, add_reachable_ref, &data) ||
-	    refs_for_each_reflog(data.refs, add_reachable_reflog, &data)) {
+	if (refs_for_each_ref(data.refs, add_reference_ref, &data) ||
+	    refs_head_ref(data.refs, add_reference_ref, &data) ||
+	    refs_for_each_reflog(data.refs, add_reference_reflog, &data)) {
 		error(_("unable to inspect refs for cloud ODB recovery"));
-		goto out;
+		return -1;
 	}
-	if (prepare_revision_walk(&revs)) {
-		error(_("unable to traverse refs for cloud ODB recovery"));
-		goto out;
-	}
-	traverse_commit_list(&revs, collect_reachable_commit,
-			     collect_reachable_object, oids);
-	ret = 0;
-out:
-	release_revisions(&revs);
-	return ret;
+	return 0;
 }
 
 static int pending_artifact_has_ref(
@@ -1279,10 +1240,10 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 	uint64_t lease_seconds = git_env_ulong(
 		"GIT_TEST_CLOUD_ODB_GC_LEASE_SECONDS",
 		CLOUD_GC_LEASE_SECONDS);
+	int references_collected = 0;
 	int final_ret = -1;
 
-	if (current_time <= 0 ||
-	    (reconcile_published && collect_reachable_objects(source, &ref_oids)))
+	if (current_time <= 0)
 		goto out;
 	now = (uint64_t)current_time;
 	for (unsigned attempt = 0; attempt < CLOUD_CAS_ATTEMPTS; attempt++) {
@@ -1295,6 +1256,21 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 		if (cloud_get_manifest(source, &manifest, &etag) ||
 		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
+		if (reconcile_published && !references_collected) {
+			int has_published = 0;
+
+			for (size_t i = 0; i < manifest.pending_nr; i++)
+				if (manifest.pending[i].state ==
+				    ODB_CLOUD_PENDING_PUBLISHED) {
+					has_published = 1;
+					break;
+				}
+			if (has_published) {
+				if (collect_reference_tips(source, &ref_oids))
+					goto attempt_out;
+				references_collected = 1;
+			}
+		}
 		for (size_t i = 0; i < manifest.pending_nr;) {
 			struct odb_cloud_pending_artifact *pending =
 				&manifest.pending[i];
@@ -1498,9 +1474,15 @@ static int publish_artifact(struct odb_source_cloud *source, const char *token,
 		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
 		pending = odb_cloud_manifest_find_pending(&manifest, token);
-		if (!pending || !pending_matches(pending, data_key, data_bytes,
-						 index_key, index_bytes))
+		if (!pending) {
+			error(_("cloud ODB pending artifact disappeared during publication"));
 			goto attempt_out;
+		}
+		if (!pending_matches(pending, data_key, data_bytes,
+				     index_key, index_bytes)) {
+			error(_("cloud ODB pending artifact changed during publication"));
+			goto attempt_out;
+		}
 		if (!artifact_present(&manifest, data_key, index_key) &&
 		    odb_cloud_manifest_add(&manifest, data_key, data_bytes,
 					   index_key, index_bytes))
@@ -1522,6 +1504,8 @@ attempt_out:
 		if (ret <= 0)
 			break;
 	}
+	if (ret < 0)
+		return -1;
 	return ret ? error(_("cloud ODB manifest CAS retry limit exceeded")) : 0;
 }
 

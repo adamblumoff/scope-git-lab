@@ -166,6 +166,7 @@ GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
 GIT_TEST_CLOUD_ODB_GC_LEASE_SECONDS=0 \
 	git -C "$bare" cat-file -e "$fallback_oid^{commit}"
 test "$(grep -c '"method":"DELETE"' "$orphan_metrics")" -ge 2
+test "$(grep -c '"method":"DELETE".*"deletes":1' "$orphan_metrics")" -ge 2
 for staging in "$bare"/objects/cloud-write-*
 do
 	test ! -e "$staging"
@@ -284,10 +285,16 @@ confirmed_run=33333333333333333333333333333333
 GIT_CLOUD_ODB_METRICS_PATH=$confirmed_metrics \
 GIT_CLOUD_ODB_METRICS_RUN=$confirmed_run \
 	git -C "$client" push --quiet "$bare" HEAD:main
-GIT_CLOUD_ODB_METRICS_PATH=$confirmed_metrics \
-GIT_CLOUD_ODB_METRICS_RUN=$confirmed_run \
+confirmed_recovery_metrics=$trash/confirmed-recovery-metrics.jsonl
+GIT_CLOUD_ODB_METRICS_PATH=$confirmed_recovery_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=66666666666666666666666666666666 \
 GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
 	git -C "$bare" cloud-bench recover
+if grep -q '"objectReads":[1-9]' "$confirmed_recovery_metrics"
+then
+	echo >&2 "published recovery traversed cloud object payloads"
+	exit 1
+fi
 if grep -q '"method":"DELETE"' "$confirmed_metrics"
 then
 	echo >&2 "recovery deleted a ref-confirmed publication"
