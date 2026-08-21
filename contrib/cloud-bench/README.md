@@ -27,7 +27,9 @@ and bucket, so changing either refuses startup instead of presenting the existin
 refs against an empty object store. The POC rejects any canonical object larger than 16 MiB, any receive
 transaction larger than 32 MiB, any publication containing more than 65,536
 objects, any generated artifact larger than 64 MiB, any manifest containing more
-than 1,024 artifacts, and more than 64 MiB of aggregate index metadata. Those explicit limits
+than 512 artifacts, and more than 64 MiB of aggregate index metadata. The
+artifact cap keeps the two synchronous metadata reads per artifact within the
+120-second fresh-clone gate at the measured storage latency. Those explicit limits
 keep publication metadata and read streams bounded until the group codec gains
 incremental object compression and inflation. Bounded direct writes use the
 same publication path so objects created by receive hooks remain available.
@@ -58,9 +60,10 @@ Independent replicas remain unsupported because refs are local.
 
 The bridge accepts at most 64 concurrent requests, further capped by a 512 MiB
 service-wide cloud-metadata budget with a conservative 256 MiB reservation per
-Git backend. It also defaults to a 30-second total request-input deadline and
-socket inactivity timeout, 1 GiB per request, and 1 GiB total buffered request
-data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
+Git backend. It decodes fixed-length and HTTP/1.1 chunked Git bodies into the
+same bounded spool. It also defaults to a 30-second total request-input deadline
+and socket inactivity timeout, 1 GiB per request, and 1 GiB total buffered
+request data. Override these with `CLOUD_BENCH_MAX_CONCURRENT_REQUESTS`,
 `CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES`,
 `CLOUD_BENCH_CLOUD_METADATA_RESERVATION_BYTES`,
 `CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS`, `CLOUD_BENCH_MAX_REQUEST_BYTES`, and
@@ -106,7 +109,7 @@ railway up --service git-cloud-bench --detach -m "Deploy cloud benchmark"
 railway deployment list --service git-cloud-bench --json
 railway ssh --service git-cloud-bench -- /app/bin/cloud-bench probe --json
 railway ssh --service git-cloud-bench -- /app/bin/cloud-bench matrix \
-  --writers 1,10,50 --warmups 1 --samples 3
+  --writers 1,10,50 --server-request-slots 50 --warmups 1 --samples 3
 ```
 
 `probe` validates immutable writes, exact range reads, ETag stability,
@@ -115,7 +118,11 @@ race against the configured bucket.
 
 `matrix` starts bounded-group writers at a barrier and records every writer
 result and storage call. It accepts writer counts, warmups, sample counts, and
-payload size. Use `--repository` or `CLOUD_BENCH_REPO_NAME` when the service is
+payload size. Its default 1/2 writer levels fit the default two-slot service.
+Larger levels fail before generating a workload unless
+`--server-request-slots` declares matching server capacity; configure the
+server request and metadata budgets to that capacity first. Use `--repository`
+or `CLOUD_BENCH_REPO_NAME` when the service is
 not mounted at `bench.git`. Each writer level is followed by a fresh mirror
 clone and strict fsck; the default run also injects five receive-pack crash
 points and requires ref inspection itself to succeed. A run is labeled

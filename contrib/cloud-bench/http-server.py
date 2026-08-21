@@ -26,6 +26,13 @@ def env_bool(name, default=False):
     raise ValueError(f"{name} must be true or false")
 
 
+class RequestBodyError(Exception):
+    def __init__(self, status, message=None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 REPO_ROOT = os.environ["GIT_HTTP_ROOT"]
 REPO_NAMES = tuple(os.environ["GIT_HTTP_REPO_NAMES"].split(":"))
 REPO_PREFIXES = tuple(f"/{name}" for name in REPO_NAMES)
@@ -211,6 +218,7 @@ class GitHandler(BaseHTTPRequestHandler):
 
         process = None
         request_body = None
+        request_length = None
         reserved_bytes = 0
         try:
             if self.command == "POST":
@@ -218,9 +226,10 @@ class GitHandler(BaseHTTPRequestHandler):
                 if request is None:
                     return
                 request_body, reserved_bytes = request
+                request_length = reserved_bytes
                 self._finish_request_input()
 
-            env = self._cgi_environment(path_info, target.query)
+            env = self._cgi_environment(path_info, target.query, request_length)
             process = subprocess.Popen(
                 ["git", "http-backend"],
                 stdin=request_body if request_body is not None else subprocess.DEVNULL,
@@ -244,60 +253,128 @@ class GitHandler(BaseHTTPRequestHandler):
                     self.server.release_body_bytes(reserved_bytes)
 
     def _read_request_body(self):
-        value = self.headers.get("Content-Length")
-        try:
-            length = int(value) if value is not None else -1
-        except ValueError:
-            length = -1
-        if length < 0:
-            self.send_error(411)
-            return None
-        if length > MAX_REQUEST_BYTES:
-            self.send_error(413)
-            return None
-        if not self.server.reserve_body_bytes(length):
-            self.send_error(503, "request-body capacity exhausted")
-            return None
-
         body = None
+        reservation = [0]
         try:
+            content_length = self.headers.get("Content-Length")
+            transfer_values = self.headers.get_all("Transfer-Encoding", [])
+            transfer_encoding = ",".join(transfer_values).strip().lower()
+            chunked = bool(transfer_values)
+            if chunked:
+                if content_length is not None:
+                    raise RequestBodyError(400, "ambiguous request framing")
+                if transfer_encoding != "chunked":
+                    raise RequestBodyError(501, "unsupported transfer encoding")
+                length = None
+            else:
+                if content_length is None:
+                    raise RequestBodyError(411)
+                try:
+                    length = int(content_length)
+                except ValueError as error:
+                    raise RequestBodyError(400, "invalid content length") from error
+                if length < 0:
+                    raise RequestBodyError(400, "invalid content length")
+                if length > MAX_REQUEST_BYTES:
+                    raise RequestBodyError(413)
+                if not self.server.reserve_body_bytes(length):
+                    raise RequestBodyError(503, "request-body capacity exhausted")
+                reservation[0] = length
+
             body = tempfile.TemporaryFile()
-            remaining = length
-            while remaining:
-                timeout = self._input_deadline - time.monotonic()
-                if timeout <= 0:
-                    raise TimeoutError
-                self.connection.settimeout(timeout)
-                chunk = self.rfile.read1(min(remaining, 64 * 1024))
-                if not chunk:
-                    try:
-                        body.close()
-                    finally:
-                        self.server.release_body_bytes(length)
-                    self.send_error(408 if self._input_expired else 400)
-                    return None
-                body.write(chunk)
-                remaining -= len(chunk)
+            if chunked:
+                self._read_chunked_body(body, reservation)
+            else:
+                self._copy_request_bytes(body, length)
             self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+        except RequestBodyError as error:
+            self.close_connection = True
+            if body is not None:
+                body.close()
+            if reservation[0]:
+                self.server.release_body_bytes(reservation[0])
+            self.send_error(error.status, error.message)
+            return None
         except (socket.timeout, TimeoutError):
             self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
-            try:
+            self.close_connection = True
+            if body is not None:
                 body.close()
-            finally:
-                self.server.release_body_bytes(length)
+            if reservation[0]:
+                self.server.release_body_bytes(reservation[0])
             self.send_error(408)
             return None
         except Exception:
-            try:
-                if body is not None:
-                    body.close()
-            finally:
-                self.server.release_body_bytes(length)
+            if body is not None:
+                body.close()
+            if reservation[0]:
+                self.server.release_body_bytes(reservation[0])
             raise
         body.seek(0)
-        return body, length
+        return body, reservation[0]
 
-    def _cgi_environment(self, path_info, query):
+    def _request_readline(self, limit):
+        timeout = self._input_deadline - time.monotonic()
+        if timeout <= 0:
+            raise TimeoutError
+        self.connection.settimeout(timeout)
+        line = self.rfile.readline(limit + 1)
+        if not line:
+            raise RequestBodyError(408 if self._input_expired else 400)
+        if len(line) > limit or not line.endswith(b"\r\n"):
+            raise RequestBodyError(400, "malformed chunk framing")
+        return line
+
+    def _read_request_bytes(self, count):
+        result = bytearray()
+        while len(result) < count:
+            timeout = self._input_deadline - time.monotonic()
+            if timeout <= 0:
+                raise TimeoutError
+            self.connection.settimeout(timeout)
+            chunk = self.rfile.read1(min(count - len(result), 64 * 1024))
+            if not chunk:
+                raise RequestBodyError(408 if self._input_expired else 400)
+            result.extend(chunk)
+        return bytes(result)
+
+    def _copy_request_bytes(self, destination, count):
+        remaining = count
+        while remaining:
+            chunk = self._read_request_bytes(min(remaining, 64 * 1024))
+            destination.write(chunk)
+            remaining -= len(chunk)
+
+    def _read_chunked_body(self, destination, reservation):
+        while True:
+            line = self._request_readline(8192)
+            size_text = line[:-2].split(b";", 1)[0]
+            if not size_text or re.fullmatch(rb"[0-9a-fA-F]+", size_text) is None:
+                raise RequestBodyError(400, "malformed chunk size")
+            if len(size_text) > 16:
+                raise RequestBodyError(413)
+            size = int(size_text, 16)
+            if size == 0:
+                trailer_bytes = 0
+                while True:
+                    trailer = self._request_readline(8192)
+                    trailer_bytes += len(trailer)
+                    if trailer_bytes > 64 * 1024:
+                        raise RequestBodyError(400, "oversized chunk trailers")
+                    if trailer == b"\r\n":
+                        return
+                    if trailer[:1] in (b" ", b"\t") or b":" not in trailer:
+                        raise RequestBodyError(400, "malformed chunk trailer")
+            if size > MAX_REQUEST_BYTES - reservation[0]:
+                raise RequestBodyError(413)
+            if not self.server.reserve_body_bytes(size):
+                raise RequestBodyError(503, "request-body capacity exhausted")
+            reservation[0] += size
+            self._copy_request_bytes(destination, size)
+            if self._read_request_bytes(2) != b"\r\n":
+                raise RequestBodyError(400, "malformed chunk framing")
+
+    def _cgi_environment(self, path_info, query, request_length=None):
         env = {
             "GATEWAY_INTERFACE": "CGI/1.1",
             "GIT_HTTP_EXPORT_ALL": "1",
@@ -313,12 +390,11 @@ class GitHandler(BaseHTTPRequestHandler):
             "SERVER_PORT": str(self.server.server_port),
             "SERVER_PROTOCOL": self.request_version,
         }
-        content_length = self.headers.get("Content-Length")
         content_type = self.headers.get("Content-Type")
         content_encoding = self.headers.get("Content-Encoding")
         git_protocol = self.headers.get("Git-Protocol")
-        if content_length is not None:
-            env["CONTENT_LENGTH"] = content_length
+        if request_length is not None:
+            env["CONTENT_LENGTH"] = str(request_length)
         if content_type is not None:
             env["CONTENT_TYPE"] = content_type
         if content_encoding is not None:

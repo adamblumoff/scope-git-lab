@@ -59,6 +59,12 @@ then
 		exit 2
 		;;
 	esac
+	case "/$run_prefix/" in
+	*"/./"*|*"//"*)
+		echo >&2 "CLOUD_BENCH_RUN_PREFIX contains unsupported path components"
+		exit 2
+		;;
+	esac
 
 	if test -n "${AWS_ENDPOINT_URL:-}" ||
 		test -n "${AWS_ACCESS_KEY_ID:-}" ||

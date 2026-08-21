@@ -27,6 +27,9 @@ FAILPOINTS = (
     "before-cas",
     "after-cas",
 )
+DEFAULT_MAX_CONCURRENT_REQUESTS = 64
+DEFAULT_MAX_CLOUD_METADATA_BYTES = 512 * 1024 * 1024
+DEFAULT_CLOUD_METADATA_RESERVATION_BYTES = 256 * 1024 * 1024
 
 
 def run(command, *, cwd=None, env=None, check=True, timeout=300):
@@ -175,6 +178,10 @@ def redact_url_userinfo(value):
     )
 
 
+def redact_url_in_text(text, url):
+    return text.replace(url, redact_url_userinfo(url))
+
+
 def fixed_env(ordinal):
     timestamp = f"2001-01-{1 + ordinal % 27:02d}T00:00:00+0000"
     env = os.environ.copy()
@@ -270,22 +277,23 @@ def push_one(barrier, repo, url, commit, refname, run_id, failpoint=None):
     started = time.perf_counter()
     try:
         result = run(command, check=False, timeout=600)
+        serialized_stderr = redact_url_in_text(result.stderr, url)
         return {
             "ref": refname,
             "latencyMs": round((time.perf_counter() - started) * 1000, 3),
             "exitCode": result.returncode,
             "success": result.returncode == 0,
             "stderrClass": classify(result.stderr),
-            "stderr": result.stderr[-2000:],
+            "stderr": serialized_stderr[-2000:],
         }
-    except subprocess.TimeoutExpired as error:
+    except subprocess.TimeoutExpired:
         return {
             "ref": refname,
             "latencyMs": round((time.perf_counter() - started) * 1000, 3),
             "exitCode": None,
             "success": False,
             "stderrClass": "timeout",
-            "stderr": str(error),
+            "stderr": "git push timed out after 600 seconds",
         }
 
 
@@ -333,8 +341,10 @@ def verify_repository(url, destination, cursor, cache_state, run_id):
                 check=False,
                 timeout=120,
             )
-        except subprocess.TimeoutExpired as error:
-            clone = subprocess.CompletedProcess([], 124, "", str(error))
+        except subprocess.TimeoutExpired:
+            clone = subprocess.CompletedProcess(
+                [], 124, "", "git clone timed out after 120 seconds"
+            )
         attempt_metrics = cursor.read(mark)
         metrics.extend(attempt_metrics)
         attempts.append(
@@ -476,13 +486,62 @@ def parse_writer_counts(value):
     return counts
 
 
+def parse_positive_integer(value):
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def configured_server_request_slots():
+    try:
+        max_requests = int(
+            os.environ.get(
+                "CLOUD_BENCH_MAX_CONCURRENT_REQUESTS",
+                str(DEFAULT_MAX_CONCURRENT_REQUESTS),
+            )
+        )
+        metadata_bytes = int(
+            os.environ.get(
+                "CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES",
+                str(DEFAULT_MAX_CLOUD_METADATA_BYTES),
+            )
+        )
+        reservation_bytes = int(
+            os.environ.get(
+                "CLOUD_BENCH_CLOUD_METADATA_RESERVATION_BYTES",
+                str(DEFAULT_CLOUD_METADATA_RESERVATION_BYTES),
+            )
+        )
+    except ValueError as error:
+        raise ValueError("server admission settings must be integers") from error
+    if min(max_requests, metadata_bytes, reservation_bytes) <= 0:
+        raise ValueError("server admission settings must be positive")
+    metadata_slots = metadata_bytes // reservation_bytes
+    if metadata_slots <= 0:
+        raise ValueError("server metadata budget must cover one reservation")
+    return min(max_requests, metadata_slots)
+
+
+def writer_capacity_error(writers, server_request_slots):
+    requested = max(writers)
+    if requested <= server_request_slots:
+        return None
+    return (
+        f"writer level {requested} exceeds the declared server capacity of "
+        f"{server_request_slots}; size the service admission budget and pass "
+        f"--server-request-slots {requested}"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(prog="cloud-bench matrix")
     parser.add_argument("--url", default="http://127.0.0.1:8080")
     parser.add_argument(
         "--repository", default=os.environ.get("CLOUD_BENCH_REPO_NAME", "bench.git")
     )
-    parser.add_argument("--writers", type=parse_writer_counts, default=[1, 10, 50])
+    parser.add_argument("--writers", type=parse_writer_counts, default=[1, 2])
+    parser.add_argument("--server-request-slots", type=parse_positive_integer)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--payload-bytes", type=int, default=20 * 1024)
@@ -492,6 +551,14 @@ def main():
     args = parser.parse_args()
     if args.warmups < 0 or args.samples <= 0 or args.payload_bytes <= 0:
         parser.error("warmups, samples, and payload bytes must be positive")
+    if args.server_request_slots is None:
+        try:
+            args.server_request_slots = configured_server_request_slots()
+        except ValueError as error:
+            parser.error(str(error))
+    capacity_error = writer_capacity_error(args.writers, args.server_request_slots)
+    if capacity_error:
+        parser.error(capacity_error)
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.repository) or args.repository in (
         ".",
         "..",
@@ -519,6 +586,7 @@ def main():
             },
             "configuration": {
                 "writers": args.writers,
+                "serverRequestSlots": args.server_request_slots,
                 "layouts": list(LAYOUTS),
                 "warmups": args.warmups,
                 "samples": args.samples,

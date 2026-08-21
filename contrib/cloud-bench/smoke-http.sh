@@ -94,6 +94,22 @@ git -C "$trash/client" \
 test "$(cat "$trash/repos/bench.git/metrics-run")" = "$metrics_run"
 rm "$trash/results/process.ndjson.active/$metrics_run"
 
+python3 - "$trash/client/chunked.bin" <<'PY'
+import random
+import sys
+
+
+random_source = random.Random(1)
+with open(sys.argv[1], "wb") as stream:
+    stream.write(random_source.randbytes(2 * 1024 * 1024))
+PY
+git -C "$trash/client" add chunked.bin
+git -C "$trash/client" commit --quiet -m chunked
+GIT_TRACE_CURL=$trash/chunked.trace \
+	git -C "$trash/client" -c http.postBuffer=1048576 \
+	push --quiet origin HEAD:main
+grep 'Transfer-Encoding: chunked' "$trash/chunked.trace" >/dev/null
+
 base=$(git -C "$trash/client" rev-parse HEAD) &&
 tree=$(git -C "$trash/client" rev-parse HEAD^{tree}) &&
 i=0 &&
@@ -108,6 +124,7 @@ git -C "$trash/client" push --quiet --all origin
 
 GIT_TRACE_CURL=$trash/curl.trace git clone --quiet "$url" "$trash/check"
 test "$(cat "$trash/check/smoke")" = smoke
+cmp "$trash/client/chunked.bin" "$trash/check/chunked.bin"
 grep 'Content-Encoding: gzip' "$trash/curl.trace" >/dev/null
 
 kill "$server_pid"
@@ -176,6 +193,35 @@ expect_invalid_s3 ip-address https://example.invalid 192.168.5.4 path
 expect_invalid_s3 reserved-prefix https://example.invalid xn--invalid path
 expect_invalid_s3 reserved-suffix https://example.invalid invalid--x-s3 path
 expect_invalid_s3 endpoint http://example.invalid valid-bucket path
+
+expect_invalid_prefix () {
+	label=$1
+	prefix=$2
+	set +e
+	env \
+		CLOUD_BENCH_REPO_ROOT="$trash/invalid-prefix-$label-repos" \
+		CLOUD_BENCH_RESULTS_DIR="$trash/invalid-prefix-$label-results" \
+		CLOUD_BENCH_CLOUD_ODB=1 \
+		CLOUD_BENCH_RUN_PREFIX="$prefix" \
+		AWS_ENDPOINT_URL=https://example.invalid \
+		AWS_ACCESS_KEY_ID=invalid-access \
+		AWS_SECRET_ACCESS_KEY=invalid-secret \
+		AWS_S3_BUCKET_NAME=valid-bucket \
+		AWS_DEFAULT_REGION=us-east-1 \
+		AWS_S3_URL_STYLE=path \
+		PORT=$port \
+		timeout 2 "$script_dir/cloud-bench" serve \
+			>"$trash/invalid-prefix-$label.log" 2>&1
+	invalid_status=$?
+	set -e
+	test "$invalid_status" = 2
+	grep "unsupported path components" \
+		"$trash/invalid-prefix-$label.log" >/dev/null
+	test ! -e "$trash/invalid-prefix-$label-repos/bench.git"
+}
+
+expect_invalid_prefix dot-component team/./repo
+expect_invalid_prefix empty-component team//repo
 
 CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
@@ -317,6 +363,7 @@ CLOUD_BENCH_REPO_ROOT=$trash/repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=0 \
 CLOUD_BENCH_CLOUD_ODB=0 \
+CLOUD_BENCH_MAX_REQUEST_BYTES=8 \
 CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES=8 \
 CLOUD_BENCH_MAX_CONCURRENT_REQUESTS=2 \
 CLOUD_BENCH_MAX_CLOUD_METADATA_BYTES=16 \
@@ -408,6 +455,31 @@ def status(sock):
 	return int(sock.recv(64).split(b" ", 2)[1])
 
 
+def chunked_status(body, extra_headers=b""):
+	sock = connect()
+	sock.sendall(
+		b"POST " + endpoint + b" HTTP/1.1\r\n"
+		b"Host: localhost\r\n"
+		b"Content-Type: application/x-git-upload-pack-request\r\n"
+		b"Transfer-Encoding: chunked\r\n" + extra_headers + b"\r\n" + body
+	)
+	result = status(sock)
+	while sock.recv(64 * 1024):
+		pass
+	sock.close()
+	return result
+
+
+assert chunked_status(
+	b"4;test=yes\r\n0000\r\n0\r\nX-Test: yes\r\n\r\n"
+) == 200
+assert chunked_status(b"z\r\n") == 400
+assert chunked_status(b"9\r\n") == 413
+assert chunked_status(
+	b"4\r\n0000\r\n0\r\n\r\n", b"Content-Length: 4\r\n"
+) == 400
+
+
 headers_one = start_slow_header()
 headers_two = start_slow_header()
 time.sleep(0.1)
@@ -472,6 +544,7 @@ python3 - "$script_dir/matrix.py" <<'PY'
 import concurrent.futures
 import importlib.util
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -493,6 +566,31 @@ samples = [
 latencies = matrix.successful_writer_latencies(samples)
 assert latencies == [1.0, 10.0, 100.0]
 assert matrix.percentile(latencies, 0.50) == 10.0
+assert matrix.writer_capacity_error([1, 2], 2) is None
+assert "--server-request-slots 50" in matrix.writer_capacity_error([1, 50], 2)
+assert matrix.redact_url_in_text(
+	"failed https://user:secret@example.com/bench.git",
+	"https://user:secret@example.com/bench.git",
+) == "failed https://example.com/bench.git"
+
+original_run = matrix.run
+
+
+def timeout_run(command, **kwargs):
+	raise subprocess.TimeoutExpired(
+		["git", "push", "https://user:secret@example.com/bench.git"], 600
+	)
+
+
+matrix.run = timeout_run
+timed_out = matrix.push_one(
+	threading.Barrier(1), "repo", "https://user:secret@example.com/bench.git",
+	"commit", "refs/heads/timeout", "1" * 32,
+)
+matrix.run = original_run
+assert timed_out["stderrClass"] == "timeout"
+assert timed_out["stderr"] == "git push timed out after 600 seconds"
+assert "secret" not in timed_out["stderr"]
 
 with tempfile.TemporaryDirectory() as directory:
 	output = pathlib.Path(directory) / "latest.json"

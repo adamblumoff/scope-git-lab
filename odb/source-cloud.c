@@ -30,7 +30,8 @@
 #define CLOUD_MAX_TRANSACTION_BYTES (32 * 1024 * 1024)
 #define CLOUD_MAX_ARTIFACT_BYTES (64 * 1024 * 1024)
 #define CLOUD_MAX_TRANSACTION_OBJECTS 65536
-#define CLOUD_MAX_MANIFEST_ARTIFACTS 1024
+/* Two synchronous metadata reads per artifact bound fresh-process startup. */
+#define CLOUD_MAX_MANIFEST_ARTIFACTS 512
 #define CLOUD_MAX_PENDING_ARTIFACTS 1024
 #define CLOUD_MAX_MANIFEST_INDEX_BYTES CLOUD_MAX_ARTIFACT_BYTES
 #define CLOUD_PENDING_GRACE_SECONDS 3600
@@ -119,13 +120,28 @@ static int conflict_status(long status)
 static int valid_prefix(const char *prefix)
 {
 	const unsigned char *p = (const unsigned char *)prefix;
+	const unsigned char *component = p;
 
-	if (!*p || *p == '/' || strstr(prefix, ".."))
+	if (!*p || *p == '/')
 		return 0;
-	for (; *p; p++)
+	for (; *p; p++) {
 		if (!isalnum(*p) && *p != '/' && *p != '-' && *p != '_' &&
 		    *p != '.')
 			return 0;
+		if (*p != '/')
+			continue;
+		if (p == component ||
+		    (p - component == 1 && component[0] == '.') ||
+		    (p - component == 2 && component[0] == '.' &&
+		     component[1] == '.'))
+			return 0;
+		component = p + 1;
+	}
+	if (p == component ||
+	    (p - component == 1 && component[0] == '.') ||
+	    (p - component == 2 && component[0] == '.' &&
+	     component[1] == '.'))
+		return 0;
 	return 1;
 }
 
