@@ -7,6 +7,7 @@
 
 struct s3_metrics {
 	uint64_t requests;
+	uint64_t transport_failures;
 	uint64_t gets;
 	uint64_t heads;
 	uint64_t puts;

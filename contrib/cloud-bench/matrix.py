@@ -442,6 +442,7 @@ def verify_repository(url, destination, cursor, cache_state, run_id):
 def summarize_metrics(records):
     fields = (
         "requests",
+        "transportFailures",
         "gets",
         "heads",
         "puts",
@@ -461,6 +462,10 @@ def summarize_metrics(records):
     result["rawEventCount"] = len(records)
     result["rawEvents"] = records
     return result
+
+
+def result_exit_code(result):
+    return 0 if result["ok"] else 1
 
 
 def run_sample(corpus, cursor, url, run_id, sample_ordinal, writers, warmup):
@@ -787,7 +792,7 @@ def main():
         atomic_write_result(args.output, encoded)
         metrics_run.cleanup()
         sys.stdout.write(encoded)
-        return 0 if overall_ok else 1
+        return result_exit_code(result)
 
 
 if __name__ == "__main__":

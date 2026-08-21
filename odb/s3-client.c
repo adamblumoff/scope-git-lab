@@ -113,7 +113,8 @@ void s3_metrics_append(const struct strbuf *line)
 
 static void append_request_metric(enum s3_request_method method,
 				  const char *range,
-				  const struct s3_response *response)
+				  const struct s3_response *response,
+				  CURLcode curl_result)
 {
 	const char *run_id = metrics_run_id();
 	struct strbuf line = STRBUF_INIT;
@@ -128,12 +129,15 @@ static void append_request_metric(enum s3_request_method method,
 	strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
 	strbuf_addf(&line,
 		    ",\"method\":\"%s\","
-		    "\"status\":%ld,\"requests\":1,\"gets\":%d,"
+		    "\"status\":%ld,\"requests\":1,"
+		    "\"transportFailures\":%d,\"transportError\":%d,"
+		    "\"gets\":%d,"
 		    "\"heads\":%d,\"puts\":%d,\"rangeRequests\":%d,"
 		    "\"rangeRequestedBytes\":%"PRIu64","
 		    "\"uploadedBytes\":%"PRIu64","
 		    "\"downloadedBytes\":%"PRIu64",\"conflicts\":%d}\n",
 		    method_name(method), response->http_status,
+		    curl_result != CURLE_OK, (int)curl_result,
 		    method == S3_REQUEST_GET, method == S3_REQUEST_HEAD,
 		    method == S3_REQUEST_PUT, !!range, requested,
 		    response->uploaded_bytes, response->downloaded_bytes,
@@ -1137,25 +1141,18 @@ static int s3_request(struct s3_client *client, const char *key,
 	if (curl_easy_getinfo(client->curl, CURLINFO_SIZE_DOWNLOAD_T,
 			      &transferred) == CURLE_OK && transferred > 0)
 		response->downloaded_bytes = transferred;
-	if (curl_result != CURLE_OK) {
-		if (download.exceeded)
-			error(_("S3 response exceeds the configured size limit"));
-		else
-			error(_("S3 request failed: %s"),
-			      curl_easy_strerror(curl_result));
-		goto out;
-	}
 	client->metrics.requests++;
 	client->metrics.uploaded_bytes += response->uploaded_bytes;
 	client->metrics.downloaded_bytes += response->downloaded_bytes;
+	if (curl_result != CURLE_OK)
+		client->metrics.transport_failures++;
 	if (response->http_status == 409 || response->http_status == 412)
 		client->metrics.conflicts++;
 	switch (method) {
 	case S3_REQUEST_GET:
 		client->metrics.gets++;
-		if (range) {
+		if (range)
 			client->metrics.range_requests++;
-		}
 		break;
 	case S3_REQUEST_HEAD:
 		client->metrics.heads++;
@@ -1167,7 +1164,15 @@ static int s3_request(struct s3_client *client, const char *key,
 		client->metrics.deletes++;
 		break;
 	}
-	append_request_metric(method, range, response);
+	append_request_metric(method, range, response, curl_result);
+	if (curl_result != CURLE_OK) {
+		if (download.exceeded)
+			error(_("S3 response exceeds the configured size limit"));
+		else
+			error(_("S3 request failed: %s"),
+			      curl_easy_strerror(curl_result));
+		goto out;
+	}
 	ret = 0;
 out:
 	curl_slist_free_all(proxy_headers);

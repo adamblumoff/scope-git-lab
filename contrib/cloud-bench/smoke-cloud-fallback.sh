@@ -17,6 +17,26 @@ bare=$trash/bench.git
 client=$trash/client
 prefix=${CLOUD_BENCH_RUN_PREFIX:-matrix/fallback-smoke-$$}
 
+transport_metrics=$trash/transport-metrics.ndjson
+set +e
+GIT_TEST_S3_ALLOW_HTTP=1 \
+AWS_ENDPOINT_URL=http://127.0.0.1:1 \
+AWS_ACCESS_KEY_ID=transport-access \
+AWS_SECRET_ACCESS_KEY=transport-secret \
+AWS_S3_BUCKET_NAME=valid-bucket \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
+GIT_CLOUD_ODB_METRICS_PATH=$transport_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=0123456789abcdef0123456789abcdef \
+	git cloud-bench probe --json \
+		>"$trash/transport-probe.out" 2>"$trash/transport-probe.err"
+transport_status=$?
+set -e
+test "$transport_status" -ne 0
+grep '"requests":1' "$transport_metrics" >/dev/null
+grep '"transportFailures":1' "$transport_metrics" >/dev/null
+grep '"transportError":[1-9]' "$transport_metrics" >/dev/null
+
 git init --bare --quiet --initial-branch=main "$bare"
 git init --quiet --initial-branch=main "$client"
 git -C "$client" config user.name "Cloud ODB fallback smoke"

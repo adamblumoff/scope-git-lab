@@ -593,6 +593,15 @@ class GitHandler(BaseHTTPRequestHandler):
         success = self._recover_cloud_odb(repo_prefix, recovery_env)
         self._record_recovery_completion(recovery_env, recovery_token, success)
 
+    def _complete_close_delimited_response(self):
+        try:
+            self.wfile.flush()
+        finally:
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
     def _buffer_receive_response(
         self,
         process,
@@ -624,7 +633,7 @@ class GitHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     try:
-                        self.wfile.flush()
+                        self._complete_close_delimited_response()
                     finally:
                         self._finish_cloud_recovery(
                             repo_prefix, recovery_env, recovery_token

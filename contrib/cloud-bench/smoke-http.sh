@@ -591,6 +591,8 @@ matrix.run = original_run
 assert timed_out["stderrClass"] == "timeout"
 assert timed_out["stderr"] == "git push timed out after 600 seconds"
 assert "secret" not in timed_out["stderr"]
+assert matrix.result_exit_code({"ok": True}) == 0
+assert matrix.result_exit_code({"ok": False}) == 1
 
 with tempfile.TemporaryDirectory() as directory:
 	output = pathlib.Path(directory) / "latest.json"
@@ -731,6 +733,11 @@ class Sink:
 		events.append(("flush",))
 
 
+class Connection:
+	def shutdown(self, how):
+		events.append(("shutdown", how))
+
+
 handler.wfile = Sink()
 handler._send_cgi_headers = lambda *args: events.append(("headers",))
 handler._finish_cloud_recovery = lambda prefix, env, token: events.append(
@@ -744,6 +751,21 @@ assert events == [
 	("headers",),
 	("body", b"receive-ok"),
 	("flush",),
+	("recover", "/bench.git", "1" * 32, completion_token),
+]
+
+events.clear()
+handler.connection = Connection()
+server.MAX_RECEIVE_RESPONSE_BYTES = 4
+process = types.SimpleNamespace(stdout=io.BytesIO(b"receive-ok"), wait=lambda: 0)
+handler._buffer_receive_response(
+	process, 200, [], "/bench.git", recovery_env, completion_token
+)
+assert events == [
+	("headers",),
+	("body", b"receive-ok"),
+	("flush",),
+	("shutdown", server.socket.SHUT_WR),
 	("recover", "/bench.git", "1" * 32, completion_token),
 ]
 PY
