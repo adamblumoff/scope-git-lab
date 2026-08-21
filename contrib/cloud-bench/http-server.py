@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import os
+import pathlib
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -314,8 +316,6 @@ class GitHandler(BaseHTTPRequestHandler):
         if ALLOW_FAILPOINTS and failpoint in allowed_failpoints:
             env["GIT_TEST_CLOUD_ODB_FAILPOINT"] = failpoint
         metrics_run = self.headers.get("X-Cloud-Odb-Metrics-Run")
-        if metrics_run is not None and re.fullmatch(r"[0-9a-f]{32}", metrics_run):
-            env["GIT_CLOUD_ODB_METRICS_RUN"] = metrics_run
         for name in (
             "AWS_ENDPOINT_URL",
             "AWS_ACCESS_KEY_ID",
@@ -349,6 +349,23 @@ class GitHandler(BaseHTTPRequestHandler):
             value = os.environ.get(name)
             if value is not None:
                 env[name] = value
+        metrics_base = env.get("GIT_CLOUD_ODB_METRICS_PATH")
+        if (
+            metrics_base
+            and metrics_run is not None
+            and re.fullmatch(r"[0-9a-f]{32}", metrics_run)
+        ):
+            active = pathlib.Path(f"{metrics_base}.active") / metrics_run
+            try:
+                active_stat = active.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISREG(active_stat.st_mode):
+                    env["GIT_CLOUD_ODB_METRICS_RUN"] = metrics_run
+                    env["GIT_CLOUD_ODB_METRICS_PATH"] = (
+                        f"{metrics_base}.{metrics_run}"
+                    )
         return env
 
     def _forward_cgi_response(self, process):

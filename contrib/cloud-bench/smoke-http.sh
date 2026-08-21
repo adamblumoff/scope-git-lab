@@ -74,10 +74,13 @@ echo smoke >"$trash/client/smoke"
 git -C "$trash/client" add smoke
 git -C "$trash/client" commit --quiet -m smoke
 metrics_run=0123456789abcdef0123456789abcdef
+mkdir -p "$trash/results/process.ndjson.active"
+: >"$trash/results/process.ndjson.active/$metrics_run"
 git -C "$trash/client" \
 	-c "http.extraHeader=X-Cloud-Odb-Metrics-Run: $metrics_run" \
 	push --quiet origin HEAD:main
 test "$(cat "$trash/repos/bench.git/metrics-run")" = "$metrics_run"
+rm "$trash/results/process.ndjson.active/$metrics_run"
 
 base=$(git -C "$trash/client" rev-parse HEAD) &&
 tree=$(git -C "$trash/client" rev-parse HEAD^{tree}) &&
@@ -138,6 +141,14 @@ expect_invalid_s3 () {
 
 expect_invalid_s3 style https://example.invalid valid-bucket bogus
 expect_invalid_s3 bucket https://example.invalid invalid_bucket path
+expect_invalid_s3 short-bucket https://example.invalid ab path
+expect_invalid_s3 uppercase-bucket https://example.invalid Invalid-bucket path
+expect_invalid_s3 leading-hyphen https://example.invalid -invalid path
+expect_invalid_s3 trailing-hyphen https://example.invalid invalid- path
+expect_invalid_s3 adjacent-periods https://example.invalid invalid..bucket path
+expect_invalid_s3 ip-address https://example.invalid 192.168.5.4 path
+expect_invalid_s3 reserved-prefix https://example.invalid xn--invalid path
+expect_invalid_s3 reserved-suffix https://example.invalid invalid--x-s3 path
 expect_invalid_s3 endpoint http://example.invalid valid-bucket path
 
 CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
@@ -457,6 +468,16 @@ with tempfile.TemporaryDirectory() as directory:
 	)
 	cursor = matrix.MetricsCursor(metrics, run_one)
 	assert matrix.summarize_metrics(cursor.read(0))["puts"] == 1
+	assert matrix.redact_url_userinfo("https://user:token@example.com/root?x=1") == \
+		"https://example.com/root?x=1"
+
+	metrics_run = matrix.MetricsRun(metrics, run_one)
+	assert metrics_run.path == pathlib.Path(f"{metrics}.{run_one}")
+	assert metrics_run.active.is_file()
+	metrics_run.path.write_text("metric\n")
+	metrics_run.cleanup()
+	assert not metrics_run.active.exists()
+	assert not metrics_run.path.exists()
 
 with tempfile.TemporaryDirectory() as directory:
 	first = matrix.Corpus(directory, "1" * 32, 16)

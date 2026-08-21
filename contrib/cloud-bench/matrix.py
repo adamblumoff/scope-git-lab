@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import atexit
 import concurrent.futures
 import hashlib
 import json
@@ -15,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 
 LAYOUTS = ("group",)
@@ -135,8 +137,42 @@ class MetricsCursor:
         return records
 
 
+class MetricsRun:
+    def __init__(self, base_path, run_id):
+        self.path = pathlib.Path(f"{base_path}.{run_id}")
+        self.active = pathlib.Path(f"{base_path}.active") / run_id
+        self.active.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.path.unlink(missing_ok=True)
+        descriptor = os.open(
+            self.active,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        os.close(descriptor)
+        atexit.register(self.cleanup)
+
+    def cleanup(self):
+        self.active.unlink(missing_ok=True)
+        self.path.unlink(missing_ok=True)
+
+
 def metrics_header(run_id):
     return f"X-Cloud-Odb-Metrics-Run: {run_id}"
+
+
+def redact_url_userinfo(value):
+    parsed = urlsplit(value)
+    if "@" not in parsed.netloc:
+        return value
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc.rsplit("@", 1)[1],
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def fixed_env(ordinal):
@@ -463,9 +499,11 @@ def main():
         parser.error("repository contains unsupported characters")
 
     run_id = uuid.uuid4().hex
+    metrics_run = MetricsRun(args.metrics, run_id)
+    public_base_url = redact_url_userinfo(args.url)
     with tempfile.TemporaryDirectory(prefix="cloud-odb-matrix-") as temporary:
         corpus = Corpus(temporary, run_id, args.payload_bytes)
-        cursor = MetricsCursor(args.metrics, run_id)
+        cursor = MetricsCursor(metrics_run.path, run_id)
         result = {
             "schema": "git-cloud-odb-matrix/v1",
             "measurementScope": "smart-http-git-workload-over-s3-odb",
@@ -473,7 +511,7 @@ def main():
             "runId": run_id,
             "deploymentId": os.environ.get("RAILWAY_DEPLOYMENT_ID"),
             "gitVersion": git(None, "version").stdout.strip(),
-            "baseUrl": args.url,
+            "baseUrl": public_base_url,
             "corpus": {
                 "generator": "deterministic-commit-tree-v1",
                 "rootCommit": corpus.root_commit,
@@ -512,7 +550,7 @@ def main():
             layout_result = {
                 "id": "C",
                 "layout": layout,
-                "url": url,
+                "url": f"{public_base_url.rstrip('/')}/{args.repository}",
                 "seed": seed,
                 "cloudEvidencePassed": cloud_evidence,
                 "writerLevels": [],
@@ -606,6 +644,7 @@ def main():
         result["ok"] = overall_ok
         encoded = json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
         atomic_write_result(args.output, encoded)
+        metrics_run.cleanup()
         sys.stdout.write(encoded)
         return 0 if overall_ok else 1
 

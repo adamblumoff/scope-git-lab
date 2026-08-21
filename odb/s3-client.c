@@ -134,12 +134,45 @@ struct s3_upload {
 static int valid_bucket_name(const char *name)
 {
 	const unsigned char *p = (const unsigned char *)name;
+	size_t len = strlen(name);
+	unsigned octets = 0;
+	int ipv4 = 1;
 
-	if (!*p)
+	if (len < 3 || len > 63 ||
+	    !isalnum(p[0]) || !isalnum(p[len - 1]) ||
+	    starts_with(name, "xn--") ||
+	    starts_with(name, "sthree-") ||
+	    starts_with(name, "amzn-s3-demo-") ||
+	    ends_with(name, "-s3alias") ||
+	    ends_with(name, "--ol-s3") ||
+	    ends_with(name, ".mrap") ||
+	    ends_with(name, "--x-s3") ||
+	    ends_with(name, "--table-s3"))
 		return 0;
-	for (; *p; p++)
-		if (!isalnum(*p) && *p != '-' && *p != '.')
+	for (; *p; p++) {
+		if ((!islower(*p) && !isdigit(*p) && *p != '-' && *p != '.') ||
+		    (*p == '.' && p[1] == '.'))
 			return 0;
+	}
+
+	p = (const unsigned char *)name;
+	while (*p && ipv4) {
+		unsigned value = 0;
+		unsigned digits = 0;
+
+		while (isdigit(*p)) {
+			if (value <= 255)
+				value = value * 10 + (*p - '0');
+			p++;
+			digits++;
+		}
+		octets++;
+		if (!digits || value > 255 ||
+		    (*p && *p++ != '.') || octets > 4)
+			ipv4 = 0;
+	}
+	if (ipv4 && octets == 4)
+		return 0;
 	return 1;
 }
 
