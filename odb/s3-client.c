@@ -25,6 +25,9 @@ enum s3_request_method {
 	S3_REQUEST_DELETE,
 };
 
+static int build_object_url(struct s3_client *client, const char *key,
+			    struct strbuf *result);
+
 static const char *method_name(enum s3_request_method method)
 {
 	switch (method) {
@@ -466,6 +469,7 @@ int s3_client_init_from_env(struct s3_client *client)
 	const char *region = required_env("AWS_DEFAULT_REGION");
 	const char *url_style = required_env("AWS_S3_URL_STYLE");
 	const char *unused;
+	struct strbuf config_url = STRBUF_INIT;
 	curl_version_info_data *curl_info;
 
 	if (!endpoint || !access_key || !secret_key || !bucket || !region ||
@@ -491,14 +495,17 @@ int s3_client_init_from_env(struct s3_client *client)
 	client->region = xstrdup(region);
 	client->url_style = xstrdup(url_style);
 	client->sigv4 = xstrfmt("aws:amz:%s:s3", region);
-	if (load_http_options(client, endpoint) ||
+	if (build_object_url(client, "git-http-options", &config_url) ||
+	    load_http_options(client, config_url.buf) ||
 	    select_ssl_backend(client->ssl_backend) ||
 	    load_proxy_credentials(client) ||
 	    load_client_key_password(client) ||
 	    load_proxy_key_password(client)) {
+		strbuf_release(&config_url);
 		s3_client_release(client);
 		return -1;
 	}
+	strbuf_release(&config_url);
 
 	/*
 	 * Keep S3 on its own easy handle. Git's HTTP transport has process-global

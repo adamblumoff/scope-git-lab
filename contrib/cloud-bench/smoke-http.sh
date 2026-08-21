@@ -203,6 +203,19 @@ test "$marker_status" = 1
 grep "marker must be a regular file" "$trash/marker-symlink.log" >/dev/null
 test ! -e "$trash/dangling-marker-target"
 
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
+CLOUD_BENCH_CLOUD_ODB=0 \
+PORT=$port \
+	timeout 2 "$script_dir/cloud-bench" serve \
+		>"$trash/marker-disabled-symlink.log" 2>&1
+marker_status=$?
+set -e
+test "$marker_status" = 1
+grep "refusing to disable" "$trash/marker-disabled-symlink.log" >/dev/null
+test ! -e "$trash/dangling-marker-target"
+
 CLOUD_BENCH_REPO_ROOT=$trash/repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=0 \

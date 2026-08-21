@@ -1,4 +1,5 @@
 clar_test_suites = [
+  'unit-tests/u-cloud-manifest.c',
   'unit-tests/u-ctype.c',
   'unit-tests/u-dir.c',
   'unit-tests/u-example-decorate.c',
@@ -641,6 +642,7 @@ integration_tests = [
   't5334-incremental-multi-pack-index.sh',
   't5335-compact-multi-pack-index.sh',
   't5351-unpack-large-objects.sh',
+  't5352-segment-odb.sh',
   't5353-storage-layout-benchmark.sh',
   't5400-send-pack.sh',
   't5401-update-hooks.sh',

@@ -145,7 +145,8 @@ then
 		else
 			printf '%s\n' "$expected_marker" >"$marker_path"
 		fi
-	elif test -e "$repo_path/objects/cloud-odb"
+	elif test -e "$repo_path/objects/cloud-odb" ||
+		test -L "$repo_path/objects/cloud-odb"
 	then
 		echo >&2 "refusing to disable an existing cloud ODB marker"
 		exit 1
