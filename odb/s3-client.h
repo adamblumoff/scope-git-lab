@@ -3,6 +3,8 @@
 
 #include "strbuf.h"
 
+#include <curl/curl.h>
+
 struct s3_metrics {
 	uint64_t requests;
 	uint64_t gets;
@@ -18,13 +20,43 @@ struct s3_metrics {
 
 struct s3_client {
 	char *endpoint;
+	char *http_version;
 	char *access_key;
 	char *secret_key;
 	char *bucket;
 	char *region;
 	char *url_style;
 	char *sigv4;
+	char *proxy;
+	char *no_proxy;
+	char *proxy_auth_method;
+	char *proxy_username;
+	char *proxy_password;
+	char *proxy_auth_header;
+	char *proxy_ssl_ca_info;
+	char *proxy_ssl_cert;
+	char *proxy_ssl_key;
+	char *proxy_ssl_key_password;
+	char *ssl_ca_info;
+	char *ssl_ca_path;
+	char *ssl_backend;
+	char *ssl_cert;
+	char *ssl_cert_type;
+	char *ssl_key;
+	char *ssl_key_type;
+	char *ssl_key_password;
+	char *ssl_cipher_list;
+	char *ssl_pinned_key;
+	char *ssl_version;
+	struct curl_slist *host_resolutions;
+	CURL *curl;
 	struct s3_metrics metrics;
+	unsigned int proxy_ssl_cert_password_protected:1;
+	unsigned int proxy_ssl_verify:1;
+	unsigned int schannel_check_revoke:1;
+	unsigned int schannel_use_ssl_ca_info:1;
+	unsigned int ssl_cert_password_protected:1;
+	unsigned int ssl_verify:1;
 	unsigned int initialized:1;
 };
 

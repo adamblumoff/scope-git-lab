@@ -11,6 +11,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
 
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.lower()
+    if normalized in ("1", "true", "yes"):
+        return True
+    if normalized in ("0", "false", "no"):
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 REPO_ROOT = os.environ["GIT_HTTP_ROOT"]
 REPO_NAMES = tuple(os.environ["GIT_HTTP_REPO_NAMES"].split(":"))
 REPO_PREFIXES = tuple(f"/{name}" for name in REPO_NAMES)
@@ -23,17 +35,22 @@ MAX_BUFFERED_REQUEST_BYTES = int(
 MAX_RECEIVE_RESPONSE_BYTES = int(
     os.environ.get("CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES", str(16 * 1024 * 1024))
 )
+MAX_RESULT_BYTES = int(
+    os.environ.get("CLOUD_BENCH_MAX_RESULT_BYTES", str(64 * 1024 * 1024))
+)
 MAX_CONCURRENT_REQUESTS = int(
     os.environ.get("CLOUD_BENCH_MAX_CONCURRENT_REQUESTS", "64")
 )
 REQUEST_TIMEOUT_SECONDS = float(
     os.environ.get("CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS", "30")
 )
+ALLOW_FAILPOINTS = env_bool("CLOUD_BENCH_ALLOW_FAILPOINTS")
 
 if min(
     MAX_REQUEST_BYTES,
     MAX_BUFFERED_REQUEST_BYTES,
     MAX_RECEIVE_RESPONSE_BYTES,
+    MAX_RESULT_BYTES,
     MAX_CONCURRENT_REQUESTS,
 ) <= 0:
     raise ValueError("request limits must be positive")
@@ -110,19 +127,48 @@ class GitHandler(BaseHTTPRequestHandler):
     def _send_latest_result(self):
         path = os.environ.get("CLOUD_BENCH_LATEST_RESULT", "/results/latest.json")
         try:
-            with open(path, "rb") as result:
-                body = result.read(16 * 1024 * 1024 + 1)
+            snapshot = None
+            result_size = 0
+            for _ in range(3):
+                candidate = tempfile.TemporaryFile()
+                with open(path, "rb") as result:
+                    before = os.fstat(result.fileno())
+                    result_size = 0
+                    while True:
+                        chunk = result.read(64 * 1024)
+                        if not chunk:
+                            break
+                        result_size += len(chunk)
+                        if result_size > MAX_RESULT_BYTES:
+                            candidate.close()
+                            self.send_error(413)
+                            return
+                        candidate.write(chunk)
+                    after = os.fstat(result.fileno())
+                identity = lambda stat: (
+                    stat.st_dev,
+                    stat.st_ino,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    stat.st_ctime_ns,
+                )
+                if identity(before) == identity(after):
+                    snapshot = candidate
+                    break
+                candidate.close()
+            if snapshot is None:
+                self.send_error(503, "result changed while being read")
+                return
+            with snapshot:
+                snapshot.seek(0)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(result_size))
+                self.end_headers()
+                shutil.copyfileobj(snapshot, self.wfile, length=64 * 1024)
         except FileNotFoundError:
             self.send_error(404)
             return
-        if len(body) > 16 * 1024 * 1024:
-            self.send_error(413)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
     def _serve_git(self):
         target = urlsplit(self.path)
@@ -264,7 +310,7 @@ class GitHandler(BaseHTTPRequestHandler):
             "before-cas",
             "after-cas",
         }
-        if failpoint in allowed_failpoints:
+        if ALLOW_FAILPOINTS and failpoint in allowed_failpoints:
             env["GIT_TEST_CLOUD_ODB_FAILPOINT"] = failpoint
         for name in (
             "AWS_ENDPOINT_URL",

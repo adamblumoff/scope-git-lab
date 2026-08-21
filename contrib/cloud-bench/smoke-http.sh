@@ -29,6 +29,7 @@ CLOUD_BENCH_REPO_ROOT=$trash/repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=1 \
 CLOUD_BENCH_CLOUD_ODB=0 \
+CLOUD_BENCH_LATEST_RESULT=$script_dir/results/railway-cloud-odb-matrix-2026-08-20.json \
 PORT=$port \
 	"$script_dir/cloud-bench" serve >"$trash/server.log" 2>&1 &
 server_pid=$!
@@ -47,6 +48,9 @@ done
 
 printf '{"status":"ok"}\n' >"$trash/expect-health"
 cmp "$trash/expect-health" "$trash/health"
+result_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+	"http://127.0.0.1:$port/results/latest.json")
+test "$result_status" = 200
 
 url=http://127.0.0.1:$port/bench.git
 bad_status=$(curl --path-as-is --silent --output /dev/null --write-out '%{http_code}' \
@@ -85,6 +89,88 @@ kill "$server_pid"
 wait "$server_pid" 2>/dev/null || :
 server_pid=
 
+CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
+CLOUD_BENCH_CLOUD_ODB=1 \
+CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_S3_BUCKET_NAME=marker-smoke \
+PORT=$port \
+	"$script_dir/cloud-bench" serve >"$trash/marker-server.log" 2>&1 &
+server_pid=$!
+
+attempt=0
+until curl --fail --silent "http://127.0.0.1:$port/healthz" >/dev/null
+do
+	attempt=$((attempt + 1))
+	if test "$attempt" -ge 50 || ! kill -0 "$server_pid" 2>/dev/null
+	then
+		cat "$trash/marker-server.log" >&2
+		exit 1
+	fi
+	sleep 0.1
+done
+
+kill "$server_pid"
+wait "$server_pid" 2>/dev/null || :
+server_pid=
+cp "$trash/marker-repos/bench.git/objects/cloud-odb" "$trash/marker-before"
+
+printf 'unexpected trailing directive\n' >> \
+	"$trash/marker-repos/bench.git/objects/cloud-odb"
+cp "$trash/marker-repos/bench.git/objects/cloud-odb" "$trash/marker-tainted"
+
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
+CLOUD_BENCH_CLOUD_ODB=1 \
+CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_S3_BUCKET_NAME=marker-smoke \
+PORT=$port \
+	timeout 2 "$script_dir/cloud-bench" serve \
+		>"$trash/marker-trailing.log" 2>&1
+marker_status=$?
+set -e
+test "$marker_status" = 1
+grep "marker does not match" "$trash/marker-trailing.log" >/dev/null
+cmp "$trash/marker-tainted" \
+	"$trash/marker-repos/bench.git/objects/cloud-odb"
+cp "$trash/marker-before" \
+	"$trash/marker-repos/bench.git/objects/cloud-odb"
+
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
+CLOUD_BENCH_CLOUD_ODB=1 \
+CLOUD_BENCH_RUN_PREFIX=matrix/different-marker \
+AWS_S3_BUCKET_NAME=marker-smoke \
+PORT=$port \
+	timeout 2 "$script_dir/cloud-bench" serve \
+		>"$trash/marker-mismatch.log" 2>&1
+marker_status=$?
+set -e
+test "$marker_status" = 1
+grep "marker does not match" "$trash/marker-mismatch.log" >/dev/null
+cmp "$trash/marker-before" \
+	"$trash/marker-repos/bench.git/objects/cloud-odb"
+
+rm "$trash/marker-repos/bench.git/objects/cloud-odb"
+ln -s "$trash/dangling-marker-target" \
+	"$trash/marker-repos/bench.git/objects/cloud-odb"
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
+CLOUD_BENCH_CLOUD_ODB=1 \
+CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_S3_BUCKET_NAME=marker-smoke \
+PORT=$port \
+	timeout 2 "$script_dir/cloud-bench" serve \
+		>"$trash/marker-symlink.log" 2>&1
+marker_status=$?
+set -e
+test "$marker_status" = 1
+grep "marker must be a regular file" "$trash/marker-symlink.log" >/dev/null
+test ! -e "$trash/dangling-marker-target"
+
 CLOUD_BENCH_REPO_ROOT=$trash/repos \
 CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=0 \
@@ -92,6 +178,7 @@ CLOUD_BENCH_CLOUD_ODB=0 \
 CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES=8 \
 CLOUD_BENCH_MAX_CONCURRENT_REQUESTS=2 \
 CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS=1 \
+CLOUD_BENCH_MAX_RESULT_BYTES=8 \
 PORT=$port \
 	"$script_dir/cloud-bench" serve >"$trash/limited-server.log" 2>&1 &
 server_pid=$!
@@ -107,6 +194,11 @@ do
 	fi
 	sleep 0.1
 done
+
+printf 123456789 >"$trash/results/latest.json"
+result_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+	"http://127.0.0.1:$port/results/latest.json")
+test "$result_status" = 413
 
 if python3 "$script_dir/matrix.py" \
 	--url "http://127.0.0.1:$port" \
@@ -230,6 +322,27 @@ slow_one.close()
 slow_two.close()
 with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
 	assert response.status == 200
+PY
+
+python3 - "$script_dir/matrix.py" <<'PY'
+import runpy
+import sys
+
+
+matrix = runpy.run_path(sys.argv[1])
+samples = [
+	{"writersRaw": [{"success": True, "latencyMs": 1.0}]},
+	{
+		"writersRaw": [
+			{"success": False, "latencyMs": 2.0},
+			{"success": True, "latencyMs": 10.0},
+			{"success": True, "latencyMs": 100.0},
+		]
+	},
+]
+latencies = matrix["successful_writer_latencies"](samples)
+assert latencies == [1.0, 10.0, 100.0]
+assert matrix["percentile"](latencies, 0.50) == 10.0
 PY
 
 echo "smart HTTP smoke test passed"

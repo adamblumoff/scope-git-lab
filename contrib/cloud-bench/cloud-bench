@@ -91,8 +91,27 @@ then
 	git -C "$repo_path" config http.receivepack "$allow_push"
 	if test "$cloud_odb" = true
 	then
-		printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' \
-			"$run_prefix" >"$repo_path/objects/cloud-odb"
+		marker_path=$repo_path/objects/cloud-odb
+		expected_marker=$(printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' \
+			"$run_prefix")
+		expected_marker_oid=$(printf '%s\n' "$expected_marker" |
+			git hash-object --stdin)
+		if test -L "$marker_path" ||
+			{ test -e "$marker_path" && test ! -f "$marker_path"; }
+		then
+			echo >&2 "cloud ODB marker must be a regular file"
+			exit 1
+		fi
+		if test -e "$marker_path"
+		then
+			if test "$(git hash-object "$marker_path")" != "$expected_marker_oid"
+			then
+				echo >&2 "existing cloud ODB marker does not match CLOUD_BENCH_RUN_PREFIX"
+				exit 1
+			fi
+		else
+			printf '%s\n' "$expected_marker" >"$marker_path"
+		fi
 	elif test -e "$repo_path/objects/cloud-odb"
 	then
 		echo >&2 "refusing to disable an existing cloud ODB marker"

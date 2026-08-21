@@ -33,6 +33,8 @@ printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' "$prefix" \
 git -C "$bare" cat-file --batch-all-objects \
 	--batch-check='%(objectname)' >"$trash/fallback-enumerated"
 grep "^$fallback_oid$" "$trash/fallback-enumerated" >/dev/null
+git -C "$bare" gc --auto
+git -C "$bare" gc
 
 printf 'cloud\n' >>"$client/object"
 git -C "$client" commit --quiet -am cloud

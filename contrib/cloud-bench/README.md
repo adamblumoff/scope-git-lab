@@ -27,6 +27,11 @@ spooled up to 16 MiB so a crashed backend can return a terminal HTTP error;
 override that bound with `CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES`. Admission
 fails with HTTP 503 when a server-wide limit is full.
 
+`/results/latest.json` accepts results up to 64 MiB by default; override the
+bound with `CLOUD_BENCH_MAX_RESULT_BYTES`. Remote failure injection is disabled
+unless `CLOUD_BENCH_ALLOW_FAILPOINTS=1` is set on the isolated benchmark
+service. A failpoint request header is ignored everywhere else.
+
 Build and smoke-test the image:
 
 ```sh

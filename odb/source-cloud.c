@@ -888,6 +888,18 @@ static int cloud_write_alternate(struct odb_source *source UNUSED,
 	return error(_("alternates are unsupported by the cloud ODB"));
 }
 
+static int cloud_optimize(struct odb_source *base UNUSED,
+			  const struct odb_optimize_options *opts UNUSED)
+{
+	return 0;
+}
+
+static bool cloud_optimize_required(struct odb_source *base UNUSED,
+				    const struct odb_optimize_options *opts UNUSED)
+{
+	return false;
+}
+
 static void cloud_close(struct odb_source *base)
 {
 	struct odb_source_cloud *source = container_of(base, struct odb_source_cloud,
@@ -948,6 +960,8 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->base.begin_transaction = cloud_begin_transaction;
 	source->base.read_alternates = cloud_read_alternates;
 	source->base.write_alternate = cloud_write_alternate;
+	source->base.optimize = cloud_optimize;
+	source->base.optimize_required = cloud_optimize_required;
 	if (cloud_load(source))
 		die(_("unable to open cloud ODB at '%s'"), path);
 	return source;

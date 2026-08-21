@@ -72,6 +72,15 @@ def percentile(values, percent):
     return round(ordered[rank], 3)
 
 
+def successful_writer_latencies(samples):
+    return [
+        writer["latencyMs"]
+        for sample in samples
+        for writer in sample["writersRaw"]
+        if writer["success"]
+    ]
+
+
 def metric_sum(records, name):
     return sum(record.get(name, 0) for record in records)
 
@@ -472,6 +481,7 @@ def main():
                     "post-writes",
                 )
                 measured = [sample for sample in samples if not sample["warmup"]]
+                measured_latencies = successful_writer_latencies(measured)
                 gate_ok = verification["clone"] and verification["fsck"] and all(
                     sample["successes"] == sample["writers"]
                     and sample["failures"] == 0
@@ -486,18 +496,9 @@ def main():
                         "correctnessPassed": gate_ok,
                         "verification": verification,
                         "summary": {
-                            "p50Ms": percentile(
-                                [sample["p50Ms"] for sample in measured if sample["p50Ms"] is not None],
-                                0.50,
-                            ),
-                            "p95Ms": percentile(
-                                [sample["p95Ms"] for sample in measured if sample["p95Ms"] is not None],
-                                0.95,
-                            ),
-                            "p99Ms": percentile(
-                                [sample["p99Ms"] for sample in measured if sample["p99Ms"] is not None],
-                                0.99,
-                            ),
+                            "p50Ms": percentile(measured_latencies, 0.50),
+                            "p95Ms": percentile(measured_latencies, 0.95),
+                            "p99Ms": percentile(measured_latencies, 0.99),
                             "failures": sum(sample["failures"] for sample in measured),
                         },
                         "samples": samples,
