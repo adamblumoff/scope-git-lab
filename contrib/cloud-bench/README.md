@@ -34,9 +34,12 @@ same publication path so objects created by receive hooks remain available.
 Before uploading, each writer records transaction-unique immutable keys in a
 conditional manifest update. Publication keeps the journal record in a
 `published` state until a current ref or reflog proves that its ref transaction
-committed. An expired published record with no ref evidence is removed from the
-visible manifest before its objects are deleted, covering a crash after object
-publication but before ref commit. Recovery holds an expiring manifest GC
+committed. The owner-only recovery helper walks the complete object graph from
+those tips, so separately published commits, trees, and blobs remain protected.
+An expired published record with no reachable object is removed from the visible
+manifest before its objects are deleted, covering a crash after object
+publication but before ref commit. Downloaded indexes must match the SHA-256 in
+their content-addressed keys. Recovery holds an expiring manifest GC
 lease, which blocks new registrations but lets current writers publish. Lease
 takeover is safe because a transaction key is never reused: a delayed prior
 owner can only delete that abandoned transaction, not a later publication of

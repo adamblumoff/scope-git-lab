@@ -3,6 +3,7 @@
 #include "gettext.h"
 #include "hash.h"
 #include "hex.h"
+#include "list-objects.h"
 #include "loose.h"
 #include "object-file.h"
 #include "odb/cloud-manifest.h"
@@ -14,6 +15,7 @@
 #include "parse.h"
 #include "refs.h"
 #include "repository.h"
+#include "revision.h"
 #include "strbuf.h"
 #include "string-list.h"
 #include "strvec.h"
@@ -59,6 +61,9 @@ struct cloud_lookup_entry {
 	size_t reader_nr;
 	size_t entry_nr;
 };
+
+static void sha256_hex(const void *data, size_t size,
+		       char hex[GIT_SHA256_HEXSZ + 1]);
 
 static const char *metrics_run_id(void)
 {
@@ -335,6 +340,9 @@ static int cloud_get_index(struct odb_source_cloud *source,
 			   const struct odb_cloud_artifact *artifact,
 			   struct s3_response *response)
 {
+	const char *filename = strrchr(artifact->index_key, '/');
+	char actual_hash[GIT_SHA256_HEXSZ + 1];
+
 	if (artifact->index_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
 	    artifact->index_bytes > SIZE_MAX ||
 	    s3_client_get_limited(&source->client, artifact->index_key,
@@ -342,6 +350,12 @@ static int cloud_get_index(struct odb_source_cloud *source,
 	    response->http_status != 200 ||
 	    response->body.len != artifact->index_bytes)
 		return error(_("unable to read cloud ODB index"));
+	sha256_hex(response->body.buf, response->body.len, actual_hash);
+	if (!filename || strlen(++filename) != GIT_SHA256_HEXSZ + 4 ||
+	    filename[GIT_SHA256_HEXSZ] != '.' ||
+	    strcmp(filename + GIT_SHA256_HEXSZ + 1, "gsi") ||
+	    memcmp(filename, actual_hash, GIT_SHA256_HEXSZ))
+		return error(_("cloud ODB index does not match its content-addressed key"));
 	return 0;
 }
 
@@ -464,12 +478,18 @@ static int cloud_load(struct odb_source_cloud *source)
 	if (cloud_manifest_within_limits(source, &manifest))
 		goto out;
 	if (manifest.artifacts_nr < old_readers ||
-	    source->manifest.artifacts_nr < old_readers)
-		goto out;
-	for (size_t i = 0; i < old_readers; i++)
-		if (!cloud_artifact_equal(&source->manifest.artifacts[i],
-					  &manifest.artifacts[i]))
-			goto out;
+	    source->manifest.artifacts_nr < old_readers) {
+		cloud_clear_readers(source);
+		old_readers = 0;
+	} else {
+		for (size_t i = 0; i < old_readers; i++)
+			if (!cloud_artifact_equal(&source->manifest.artifacts[i],
+						  &manifest.artifacts[i])) {
+				cloud_clear_readers(source);
+				old_readers = 0;
+				break;
+			}
+	}
 	fetched = 1;
 	if (manifest.artifacts_nr > old_readers)
 		REALLOC_ARRAY(source->groups, manifest.artifacts_nr);
@@ -1078,54 +1098,97 @@ static int manifest_protects_key(const struct odb_cloud_manifest *manifest,
 	return 0;
 }
 
-static int collect_ref_oid(const struct reference *ref, void *cb_data)
-{
-	struct oidset *oids = cb_data;
-
-	if (!is_null_oid(ref->oid))
-		oidset_insert(oids, ref->oid);
-	return 0;
-}
-
-static int collect_reflog_oid(const char *refname UNUSED,
-			      struct object_id *old_oid,
-			      struct object_id *new_oid,
-			      const char *committer UNUSED,
-			      timestamp_t timestamp UNUSED, int tz UNUSED,
-			      const char *msg UNUSED, void *cb_data)
-{
-	struct oidset *oids = cb_data;
-
-	if (!is_null_oid(old_oid))
-		oidset_insert(oids, old_oid);
-	if (!is_null_oid(new_oid))
-		oidset_insert(oids, new_oid);
-	return 0;
-}
-
-struct collect_reflog_data {
+struct cloud_reachability_data {
+	struct repository *repo;
+	struct rev_info *revs;
 	struct ref_store *refs;
-	struct oidset *oids;
 };
 
-static int collect_reflog(const char *refname, void *cb_data)
+static int add_reachable_tip(struct cloud_reachability_data *data,
+			     const struct object_id *oid)
 {
-	struct collect_reflog_data *data = cb_data;
+	struct object *object;
 
-	return refs_for_each_reflog_ent(data->refs, refname,
-					collect_reflog_oid, data->oids);
+	if (is_null_oid(oid))
+		return 0;
+	object = parse_object(data->repo, oid);
+	if (!object)
+		return error(_("unable to read ref target for cloud ODB recovery"));
+	add_pending_object(data->revs, object, "");
+	return 0;
 }
 
-static int collect_ref_evidence(struct odb_source_cloud *source,
-				struct oidset *oids)
+static int add_reachable_ref(const struct reference *ref, void *cb_data)
 {
-	struct ref_store *refs = get_main_ref_store(source->base.odb->repo);
-	struct collect_reflog_data data = { .refs = refs, .oids = oids };
+	return add_reachable_tip(cb_data, ref->oid);
+}
 
-	if (refs_for_each_ref(refs, collect_ref_oid, oids) ||
-	    refs_for_each_reflog(refs, collect_reflog, &data))
-		return error(_("unable to inspect refs for cloud ODB recovery"));
-	return 0;
+static int add_reachable_reflog_oid(
+	const char *refname UNUSED, struct object_id *old_oid,
+	struct object_id *new_oid, const char *committer UNUSED,
+	timestamp_t timestamp UNUSED, int tz UNUSED,
+	const char *msg UNUSED, void *cb_data)
+{
+	struct cloud_reachability_data *data = cb_data;
+
+	return add_reachable_tip(data, old_oid) ||
+		add_reachable_tip(data, new_oid);
+}
+
+static int add_reachable_reflog(const char *refname, void *cb_data)
+{
+	struct cloud_reachability_data *data = cb_data;
+
+	return refs_for_each_reflog_ent(data->refs, refname,
+					add_reachable_reflog_oid, data);
+}
+
+static void collect_reachable_commit(struct commit *commit, void *cb_data)
+{
+	struct oidset *oids = cb_data;
+
+	oidset_insert(oids, &commit->object.oid);
+}
+
+static void collect_reachable_object(struct object *object,
+				     const char *name UNUSED, void *cb_data)
+{
+	struct oidset *oids = cb_data;
+
+	oidset_insert(oids, &object->oid);
+}
+
+static int collect_reachable_objects(struct odb_source_cloud *source,
+				     struct oidset *oids)
+{
+	struct rev_info revs;
+	struct cloud_reachability_data data = {
+		.repo = source->base.odb->repo,
+		.revs = &revs,
+	};
+	int ret = -1;
+
+	repo_init_revisions(data.repo, &revs, NULL);
+	data.refs = get_main_ref_store(data.repo);
+	revs.tag_objects = 1;
+	revs.tree_objects = 1;
+	revs.blob_objects = 1;
+	if (refs_for_each_ref(data.refs, add_reachable_ref, &data) ||
+	    refs_head_ref(data.refs, add_reachable_ref, &data) ||
+	    refs_for_each_reflog(data.refs, add_reachable_reflog, &data)) {
+		error(_("unable to inspect refs for cloud ODB recovery"));
+		goto out;
+	}
+	if (prepare_revision_walk(&revs)) {
+		error(_("unable to traverse refs for cloud ODB recovery"));
+		goto out;
+	}
+	traverse_commit_list(&revs, collect_reachable_commit,
+			     collect_reachable_object, oids);
+	ret = 0;
+out:
+	release_revisions(&revs);
+	return ret;
 }
 
 static int pending_artifact_has_ref(
@@ -1191,7 +1254,7 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 	int final_ret = -1;
 
 	if (current_time <= 0 ||
-	    (reconcile_published && collect_ref_evidence(source, &ref_oids)))
+		    (reconcile_published && collect_reachable_objects(source, &ref_oids)))
 		goto out;
 	now = (uint64_t)current_time;
 	for (unsigned attempt = 0; attempt < CLOUD_CAS_ATTEMPTS; attempt++) {
@@ -1319,6 +1382,8 @@ out:
 
 int odb_source_cloud_recover(struct odb_source_cloud *source)
 {
+	if (!source->base.local)
+		return error(_("published recovery requires the cloud ODB's owning repository"));
 	if (recover_pending_artifacts(source, 1))
 		return -1;
 	/* Recovery may remove an unreferenced artifact from any ordinal. */
@@ -1697,9 +1762,8 @@ static void cloud_prepare(struct odb_source *base, enum odb_prepare_flags flags)
 						       base);
 
 	odb_source_prepare(&source->fallback->base, flags);
-	if (odb_source_cloud_recover(source))
-		warning(_("unable to reconcile cloud ODB publications"));
-	else if ((flags & ODB_PREPARE_FLUSH_CACHES) && cloud_load(source))
+	/* Published recovery runs only in the owning repository's helper. */
+	if ((flags & ODB_PREPARE_FLUSH_CACHES) && cloud_load(source))
 		die(_("unable to reload cloud ODB"));
 }
 

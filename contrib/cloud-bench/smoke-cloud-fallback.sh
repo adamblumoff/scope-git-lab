@@ -154,6 +154,86 @@ then
 	exit 1
 fi
 
+stale_oid=$(printf 'stale reader artifact %s\n' "$prefix" |
+	git -C "$bare" hash-object -w --stdin)
+request_fifo=$trash/stale-reader.in
+response_fifo=$trash/stale-reader.out
+mkfifo "$request_fifo" "$response_fifo"
+git -C "$bare" cat-file --batch-check <"$request_fifo" >"$response_fifo" &
+batch_pid=$!
+exec 3>"$request_fifo"
+exec 4<"$response_fifo"
+printf '%s\n' "$stale_oid" >&3
+IFS= read -r stale_result <&4
+test "${stale_result#"$stale_oid blob "}" != "$stale_result"
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+replacement_oid=$(printf 'replacement reader artifact %s\n' "$prefix" |
+	git -C "$bare" hash-object -w --stdin)
+printf '%s\n' "$replacement_oid" >&3
+IFS= read -r replacement_result <&4
+test "${replacement_result#"$replacement_oid blob "}" != \
+	"$replacement_result"
+exec 3>&-
+exec 4<&-
+wait "$batch_pid"
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+
+alternate_metrics=$trash/alternate-metrics.jsonl
+alternate_run=55555555555555555555555555555555
+alternate_oid=$(printf 'alternate owner artifact %s\n' "$prefix" |
+	GIT_CLOUD_ODB_METRICS_PATH=$alternate_metrics \
+	GIT_CLOUD_ODB_METRICS_RUN=$alternate_run \
+	git -C "$bare" hash-object -w --stdin)
+alternate_consumer=$trash/alternate-consumer.git
+git init --bare --quiet "$alternate_consumer"
+printf '%s\n' "$bare/objects" \
+	>"$alternate_consumer/objects/info/alternates"
+GIT_CLOUD_ODB_METRICS_PATH=$alternate_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$alternate_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$alternate_consumer" cat-file -e "$alternate_oid^{blob}"
+if grep -q '"method":"DELETE"' "$alternate_metrics"
+then
+	echo >&2 "alternate consumer reclaimed its owner's publication"
+	exit 1
+fi
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+
+direct_metrics=$trash/direct-metrics.jsonl
+direct_run=44444444444444444444444444444444
+direct_blob=$(printf 'direct reachable blob\n' |
+	GIT_CLOUD_ODB_METRICS_PATH=$direct_metrics \
+	GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
+	git -C "$bare" hash-object -w --stdin)
+direct_tree=$(printf '100644 blob %s\tdirect\n' "$direct_blob" |
+	GIT_CLOUD_ODB_METRICS_PATH=$direct_metrics \
+	GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
+	git -C "$bare" mktree)
+direct_commit=$(printf 'direct publication graph\n' |
+	GIT_AUTHOR_NAME='Cloud ODB smoke' \
+	GIT_AUTHOR_EMAIL=cloud-odb-smoke@example.invalid \
+	GIT_COMMITTER_NAME='Cloud ODB smoke' \
+	GIT_COMMITTER_EMAIL=cloud-odb-smoke@example.invalid \
+	GIT_CLOUD_ODB_METRICS_PATH=$direct_metrics \
+	GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
+	git -C "$bare" commit-tree "$direct_tree")
+git -C "$bare" update-ref refs/heads/direct "$direct_commit"
+GIT_CLOUD_ODB_METRICS_PATH=$direct_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+if grep -q '"method":"DELETE"' "$direct_metrics"
+then
+	echo >&2 "recovery deleted a transitively reachable publication"
+	exit 1
+fi
+test "$(git -C "$bare" rev-parse refs/heads/direct^{tree})" = "$direct_tree"
+test "$(git -C "$bare" show refs/heads/direct:direct)" = \
+	'direct reachable blob'
+
 printf 'cloud\n' >>"$client/object"
 git -C "$client" commit --quiet -am cloud
 confirmed_metrics=$trash/confirmed-metrics.jsonl
