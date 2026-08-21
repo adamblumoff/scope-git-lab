@@ -45,6 +45,18 @@ printf 'git-cloud-odb 2\nlayout group\nprefix %s/group\nstorage %s\n' \
 	"$prefix" "$storage_id" \
 	>"$bare/objects/cloud-odb"
 
+cp "$bare/objects/cloud-odb" "$trash/cloud-odb.marker"
+dd if=/dev/zero of="$bare/objects/cloud-odb" bs=1025 count=1 2>/dev/null
+set +e
+git -C "$bare" cat-file -e "$fallback_oid^{commit}" \
+	>"$trash/marker-large.out" 2>"$trash/marker-large.err"
+marker_status=$?
+set -e
+test "$marker_status" -ne 0
+grep "cloud ODB marker .* exceeds the size limit" \
+	"$trash/marker-large.err" >/dev/null
+mv "$trash/cloud-odb.marker" "$bare/objects/cloud-odb"
+
 sleep 1
 test "$(printf '%s' "$freshen_contents" |
 	git -C "$bare" hash-object -w --stdin)" = "$freshen_oid"
@@ -95,9 +107,20 @@ set -- "$bare"/objects/cloud-write-*
 test -d "$1"
 rm "$1/data.gsg" "$1/index.gsi"
 rmdir "$1"
+set +e
 GIT_CLOUD_ODB_METRICS_PATH=$orphan_metrics \
 GIT_CLOUD_ODB_METRICS_RUN=$orphan_run \
 GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+GIT_TEST_CLOUD_ODB_FAILPOINT=after-gc-lease \
+	git -C "$bare" cat-file -e "$fallback_oid^{commit}" \
+	>"$trash/gc-owner.out" 2>"$trash/gc-owner.err"
+gc_owner_status=$?
+set -e
+test "$gc_owner_status" -ne 0
+GIT_CLOUD_ODB_METRICS_PATH=$orphan_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$orphan_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+GIT_TEST_CLOUD_ODB_GC_LEASE_SECONDS=0 \
 	git -C "$bare" cat-file -e "$fallback_oid^{commit}"
 test "$(grep -c '"method":"DELETE"' "$orphan_metrics")" -ge 2
 for staging in "$bare"/objects/cloud-write-*
@@ -105,9 +128,49 @@ do
 	test ! -e "$staging"
 done
 
+printf 'published without ref\n' >>"$client/object"
+git -C "$client" commit --quiet -am published-without-ref
+unreferenced_oid=$(git -C "$client" rev-parse HEAD)
+published_metrics=$trash/published-metrics.jsonl
+published_run=22222222222222222222222222222222
+set +e
+GIT_CLOUD_ODB_METRICS_PATH=$published_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$published_run \
+GIT_TEST_CLOUD_ODB_FAILPOINT=after-cas \
+	git -C "$client" push --quiet "$bare" HEAD:main
+published_status=$?
+set -e
+test "$published_status" -ne 0
+test "$(git -C "$bare" rev-parse main)" = "$fallback_oid"
+GIT_CLOUD_ODB_METRICS_PATH=$published_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$published_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+git -C "$bare" cat-file -e "$fallback_oid^{commit}"
+test "$(grep -c '"method":"DELETE"' "$published_metrics")" -ge 2
+if git -C "$bare" cat-file -e "$unreferenced_oid^{commit}" 2>/dev/null
+then
+	echo >&2 "after-cas artifact remained readable after recovery"
+	exit 1
+fi
+
 printf 'cloud\n' >>"$client/object"
 git -C "$client" commit --quiet -am cloud
-git -C "$client" push --quiet "$bare" HEAD:main
+confirmed_metrics=$trash/confirmed-metrics.jsonl
+confirmed_run=33333333333333333333333333333333
+GIT_CLOUD_ODB_METRICS_PATH=$confirmed_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$confirmed_run \
+	git -C "$client" push --quiet "$bare" HEAD:main
+GIT_CLOUD_ODB_METRICS_PATH=$confirmed_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$confirmed_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+if grep -q '"method":"DELETE"' "$confirmed_metrics"
+then
+	echo >&2 "recovery deleted a ref-confirmed publication"
+	exit 1
+fi
+git -C "$bare" cat-file -e "$(git -C "$client" rev-parse HEAD)^{commit}"
 printf 'second cloud artifact\n' >>"$client/object"
 git -C "$client" commit --quiet -am second-cloud-artifact
 git -C "$client" push --quiet "$bare" HEAD:main

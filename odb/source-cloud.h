@@ -25,4 +25,7 @@ struct odb_source_cloud {
 struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 					      const char *path, bool local);
 
+/* The caller must finish repository setup before reconciling against refs. */
+int odb_source_cloud_recover(struct odb_source_cloud *source);
+
 #endif /* ODB_SOURCE_CLOUD_H */

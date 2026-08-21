@@ -1,14 +1,21 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "git-compat-util.h"
 #include "gettext.h"
 #include "json-writer.h"
+#include "odb.h"
+#include "odb/source-cloud.h"
 #include "odb/s3-client.h"
+#include "repository.h"
 #include "run-command.h"
+#include "setup.h"
 #include "strbuf.h"
 #include "trace2.h"
 #include "wrapper.h"
 
 static const char cloud_bench_usage[] =
 	"git-cloud-bench probe --json\n"
+	"git-cloud-bench recover\n"
 	"git-cloud-bench validate-config [--print-storage-id]";
 
 static const char race_manifest_one[] =
@@ -735,6 +742,18 @@ static int validate_config(int print_storage_id)
 	return ret ? 1 : 0;
 }
 
+static int recover_cloud_odb(void)
+{
+	struct odb_source *source;
+
+	setup_git_directory(the_repository);
+	source = the_repository->objects->sources;
+	if (source->type != ODB_SOURCE_CLOUD)
+		return error(_("repository does not use a cloud ODB"));
+	return odb_source_cloud_recover(
+		container_of(source, struct odb_source_cloud, base));
+}
+
 int cmd_main(int argc, const char **argv)
 {
 	trace2_cmd_name("cloud-bench");
@@ -746,6 +765,8 @@ int cmd_main(int argc, const char **argv)
 			usage(cloud_bench_usage);
 		return validate_config(argc == 3);
 	}
+	if (argc == 2 && !strcmp(argv[1], "recover"))
+		return recover_cloud_odb();
 	if (argc != 3 || strcmp(argv[1], "probe") || strcmp(argv[2], "--json"))
 		usage(cloud_bench_usage);
 	return run_probe();

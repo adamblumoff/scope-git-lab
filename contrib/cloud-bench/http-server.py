@@ -224,7 +224,7 @@ class GitHandler(BaseHTTPRequestHandler):
                 stdout=subprocess.PIPE,
                 env=env,
             )
-            self._forward_cgi_response(process)
+            self._forward_cgi_response(process, repo_prefix)
         except (BrokenPipeError, ConnectionResetError):
             if process is not None:
                 process.terminate()
@@ -386,7 +386,7 @@ class GitHandler(BaseHTTPRequestHandler):
                     )
         return env
 
-    def _forward_cgi_response(self, process):
+    def _forward_cgi_response(self, process, repo_prefix):
         status = 200
         headers = []
         header_bytes = 0
@@ -415,7 +415,7 @@ class GitHandler(BaseHTTPRequestHandler):
                 headers.append((name, value.strip()))
 
         if urlsplit(self.path).path.endswith("/git-receive-pack"):
-            self._buffer_receive_response(process, status, headers)
+            self._buffer_receive_response(process, status, headers, repo_prefix)
             return
 
         self._send_cgi_headers(status, headers)
@@ -441,7 +441,34 @@ class GitHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-    def _buffer_receive_response(self, process, status, headers):
+    def _recover_cloud_odb(self, repo_prefix):
+        repo_path = pathlib.Path(REPO_ROOT, repo_prefix.removeprefix("/"))
+        marker = repo_path / "objects" / "cloud-odb"
+        try:
+            marker_stat = marker.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(marker_stat.st_mode):
+            self.log_error("cloud ODB marker is not a regular file")
+            return
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo_path), "cloud-bench", "recover"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.log_error("cloud ODB recovery failed to run: %s", error)
+            return
+        if result.returncode:
+            self.log_error(
+                "cloud ODB recovery exited with status %d", result.returncode
+            )
+
+    def _buffer_receive_response(self, process, status, headers, repo_prefix):
         response_body = tempfile.TemporaryFile()
         response_bytes = 0
         while True:
@@ -462,6 +489,8 @@ class GitHandler(BaseHTTPRequestHandler):
                     self.log_error(
                         "git http-backend exited with status %d", return_code
                     )
+                else:
+                    self._recover_cloud_odb(repo_prefix)
                 return
             response_body.write(chunk)
         process.stdout.close()
@@ -471,6 +500,7 @@ class GitHandler(BaseHTTPRequestHandler):
             response_body.close()
             self.send_error(500, "git receive-pack failed")
             return
+        self._recover_cloud_odb(repo_prefix)
         response_body.seek(0)
         self._send_cgi_headers(status, headers, response_bytes)
         shutil.copyfileobj(response_body, self.wfile, length=64 * 1024)

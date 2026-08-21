@@ -16,9 +16,10 @@ void test_cloud_manifest__round_trip(void)
 	cl_must_pass(odb_cloud_manifest_add(&original,
 		"run/objects/two.gsg", 678, "run/objects/two.gsi", 90));
 	original.gc_token = xstrdup("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+	original.gc_created_at = 123455;
 	cl_must_pass(odb_cloud_manifest_add_pending(
 		&original, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 123456,
-		ODB_CLOUD_PENDING_ACTIVE, "run/objects/pending.gsg", 12,
+		ODB_CLOUD_PENDING_PUBLISHED, "run/objects/pending.gsg", 12,
 		"run/objects/pending.gsi", 34));
 	odb_cloud_manifest_write(&original, &serialized);
 	cl_must_pass(odb_cloud_manifest_parse(&parsed, serialized.buf,
@@ -29,11 +30,16 @@ void test_cloud_manifest__round_trip(void)
 			  "run/objects/two.gsg");
 	cl_assert_equal_u(parsed.artifacts[1].index_bytes, 90);
 	cl_assert_equal_s(parsed.gc_token, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+	cl_assert_equal_u(parsed.gc_created_at, 123455);
 	cl_assert_equal_u(parsed.pending_nr, 1);
 	cl_assert_equal_s(parsed.pending[0].token,
 			  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 	cl_assert_equal_u(parsed.pending[0].created_at, 123456);
-	cl_assert_equal_i(parsed.pending[0].state, ODB_CLOUD_PENDING_ACTIVE);
+	cl_assert_equal_i(parsed.pending[0].state,
+			  ODB_CLOUD_PENDING_PUBLISHED);
+	cl_must_pass(odb_cloud_manifest_remove_artifact(
+		&parsed, "run/objects/one.gsg", "run/objects/one.gsi"));
+	cl_assert_equal_u(parsed.artifacts_nr, 1);
 	cl_must_pass(odb_cloud_manifest_remove_pending(
 		&parsed, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
 	cl_assert_equal_u(parsed.pending_nr, 0);
@@ -100,5 +106,15 @@ void test_cloud_manifest__validates_content_addressed_artifact_keys(void)
 	key.buf[key.len - 5] = 'A';
 	cl_assert(!odb_cloud_manifest_key_is_artifact(
 		key.buf, "run/group", "gsg"));
+	strbuf_reset(&key);
+	strbuf_addf(&key,
+		    "run/group/transactions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/objects/%s.gsi",
+		    hash);
+	cl_assert(odb_cloud_manifest_key_is_transaction_artifact(
+		key.buf, "run/group", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "gsi"));
+	cl_assert(odb_cloud_manifest_key_is_scoped_artifact(
+		key.buf, "run/group", "gsi"));
+	cl_assert(!odb_cloud_manifest_key_is_transaction_artifact(
+		key.buf, "run/group", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "gsi"));
 	strbuf_release(&key);
 }

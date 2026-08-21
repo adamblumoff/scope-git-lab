@@ -31,16 +31,20 @@ than 1,024 artifacts, and more than 64 MiB of aggregate index metadata. Those ex
 keep publication metadata and read streams bounded until the group codec gains
 incremental object compression and inflation. Bounded direct writes use the
 same publication path so objects created by receive hooks remain available.
-Before uploading, each writer records its immutable keys in a conditional
-manifest update. Recovery first marks expired records while holding a manifest
-GC lease, which blocks new registrations but lets current writers publish. Only
-the process that acquired that token may delete unreachable keys or clear the
-lease; another process fails closed instead of acting on a stale manifest. A
-process, container, or host loss before lease acquisition is recovered from the
-remote journal. Loss after acquisition leaves the repository fenced for manual
-repair because safely stealing a distributed delete lease requires a separate
-fencing service. Active records receive a one-hour safety window before
-recovery; local staging cleanup is only a disk-space optimization. Files-backed
+Before uploading, each writer records transaction-unique immutable keys in a
+conditional manifest update. Publication keeps the journal record in a
+`published` state until a current ref or reflog proves that its ref transaction
+committed. An expired published record with no ref evidence is removed from the
+visible manifest before its objects are deleted, covering a crash after object
+publication but before ref commit. Recovery holds an expiring manifest GC
+lease, which blocks new registrations but lets current writers publish. Lease
+takeover is safe because a transaction key is never reused: a delayed prior
+owner can only delete that abandoned transaction, not a later publication of
+the same content. Active records and GC leases receive a one-hour safety window;
+`git cloud-bench recover` performs an explicit recovery pass after repository
+setup. The service runs it after each successful receive; operators may run it
+after a failed receive once the safety window has elapsed.
+Local staging cleanup is only a disk-space optimization. Files-backed
 optimization is rejected explicitly after cloud activation because ordinary
 `git repack` would hydrate reachable cloud objects into the local fallback.
 Independent replicas remain unsupported because refs are local.

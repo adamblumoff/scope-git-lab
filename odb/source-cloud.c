@@ -12,6 +12,7 @@
 #include "odb/streaming.h"
 #include "oidset.h"
 #include "parse.h"
+#include "refs.h"
 #include "repository.h"
 #include "strbuf.h"
 #include "string-list.h"
@@ -31,6 +32,8 @@
 #define CLOUD_MAX_PENDING_ARTIFACTS 1024
 #define CLOUD_MAX_MANIFEST_INDEX_BYTES CLOUD_MAX_ARTIFACT_BYTES
 #define CLOUD_PENDING_GRACE_SECONDS 3600
+#define CLOUD_GC_LEASE_SECONDS 3600
+#define CLOUD_MARKER_MAX_BYTES 1024
 
 struct cloud_range {
 	struct odb_source_cloud *source;
@@ -187,13 +190,27 @@ static int read_marker(const char *objects_path, struct strbuf *prefix,
 	struct string_list lines = STRING_LIST_INIT_DUP;
 	const char *prefix_value;
 	const char *storage_value;
+	ssize_t bytes;
+	int fd = -1;
 	int ret = -1;
 
 	strbuf_addf(&path, "%s/cloud-odb", objects_path);
-	if (strbuf_read_file(&contents, path.buf, 1024) < 0) {
+	fd = open(path.buf, O_RDONLY);
+	if (fd < 0) {
 		error_errno(_("unable to read cloud ODB marker '%s'"), path.buf);
 		goto out;
 	}
+	strbuf_grow(&contents, CLOUD_MARKER_MAX_BYTES + 1);
+	bytes = read_in_full(fd, contents.buf, CLOUD_MARKER_MAX_BYTES + 1);
+	if (bytes < 0) {
+		error_errno(_("unable to read cloud ODB marker '%s'"), path.buf);
+		goto out;
+	}
+	if (bytes > CLOUD_MARKER_MAX_BYTES) {
+		error(_("cloud ODB marker '%s' exceeds the size limit"), path.buf);
+		goto out;
+	}
+	strbuf_setlen(&contents, bytes);
 	string_list_split(&lines, contents.buf, "\n", -1);
 	if (lines.nr && !*lines.items[lines.nr - 1].string) {
 		free(lines.items[lines.nr - 1].string);
@@ -211,6 +228,8 @@ static int read_marker(const char *objects_path, struct strbuf *prefix,
 	strbuf_addstr(prefix, prefix_value);
 	ret = 0;
 out:
+	if (fd >= 0)
+		close(fd);
 	string_list_clear(&lines, 0);
 	strbuf_release(&contents);
 	strbuf_release(&path);
@@ -408,9 +427,9 @@ static int cloud_manifest_within_limits(struct odb_source_cloud *source,
 	for (size_t i = 0; i < manifest->artifacts_nr; i++) {
 		uint64_t artifact_bytes = manifest->artifacts[i].index_bytes;
 
-		if (!odb_cloud_manifest_key_is_artifact(
+		if (!odb_cloud_manifest_key_is_scoped_artifact(
 			    manifest->artifacts[i].data_key, source->prefix.buf, "gsg") ||
-		    !odb_cloud_manifest_key_is_artifact(
+		    !odb_cloud_manifest_key_is_scoped_artifact(
 			    manifest->artifacts[i].index_key, source->prefix.buf, "gsi"))
 			return error(_("cloud manifest contains an artifact outside its storage prefix"));
 		if (artifact_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
@@ -419,10 +438,12 @@ static int cloud_manifest_within_limits(struct odb_source_cloud *source,
 		index_bytes += artifact_bytes;
 	}
 	for (size_t i = 0; i < manifest->pending_nr; i++)
-		if (!odb_cloud_manifest_key_is_artifact(
-			    manifest->pending[i].data_key, source->prefix.buf, "gsg") ||
-		    !odb_cloud_manifest_key_is_artifact(
-			    manifest->pending[i].index_key, source->prefix.buf, "gsi"))
+		if (!odb_cloud_manifest_key_is_transaction_artifact(
+			    manifest->pending[i].data_key, source->prefix.buf,
+			    manifest->pending[i].token, "gsg") ||
+		    !odb_cloud_manifest_key_is_transaction_artifact(
+			    manifest->pending[i].index_key, source->prefix.buf,
+			    manifest->pending[i].token, "gsi"))
 			return error(_("cloud manifest contains a pending artifact outside its storage prefix"));
 		else if (manifest->pending[i].data_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
 			 manifest->pending[i].index_bytes > CLOUD_MAX_ARTIFACT_BYTES)
@@ -487,17 +508,32 @@ static int cloud_lookup_segment(struct odb_source_cloud *source,
 	return 0;
 }
 
+static int cloud_read_entry_data(
+	struct odb_source_cloud *source, size_t nr,
+	const struct odb_segment_group_entry *entry, enum object_type *type,
+	size_t *size, size_t *disk_size, void **data);
+
 static int cloud_read_data(struct odb_source_cloud *source,
 			   const struct object_id *oid, enum object_type *type,
 			   size_t *size, size_t *disk_size, void **data)
 {
 	const struct odb_segment_group_entry *entry;
 	size_t nr;
-	int group_cache_hit = 0;
 	int ret = cloud_lookup_segment(source, oid, &nr, &entry);
 
 	if (ret)
 		return ret;
+	return cloud_read_entry_data(source, nr, entry, type, size,
+				     disk_size, data);
+}
+
+static int cloud_read_entry_data(
+	struct odb_source_cloud *source, size_t nr,
+	const struct odb_segment_group_entry *entry, enum object_type *type,
+	size_t *size, size_t *disk_size, void **data)
+{
+	int group_cache_hit = 0;
+
 	{
 		const struct odb_segment_group_info *group =
 			&source->groups[nr].groups[entry->group_nr];
@@ -622,6 +658,7 @@ found:
 
 struct cloud_each_data {
 	struct odb_source_cloud *source;
+	size_t reader_nr;
 	const struct object_info *request;
 	odb_for_each_object_cb cb;
 	void *cb_data;
@@ -639,10 +676,14 @@ static int cloud_match_hash(size_t len, const unsigned char *a,
 	return !len || !((*a ^ *b) & 0xf0);
 }
 
-static int cloud_each_oid(struct cloud_each_data *data,
-			  const struct object_id *oid)
+static int cloud_each_entry(struct cloud_each_data *data,
+			    const struct odb_segment_group_entry *entry)
 {
 	struct object_info oi;
+	enum object_type type;
+	size_t size, disk_size;
+	void *content = NULL;
+	const struct object_id *oid = &entry->oid;
 
 	if (data->opts->prefix &&
 	    !cloud_match_hash(data->opts->prefix_hex_len,
@@ -651,15 +692,32 @@ static int cloud_each_oid(struct cloud_each_data *data,
 	if (!data->request)
 		return data->cb(oid, NULL, data->cb_data);
 	oi = *data->request;
-	if (cloud_read_object_info(&data->source->base, oid, &oi, 0))
+	if (cloud_read_entry_data(data->source, data->reader_nr, entry,
+				  &type, &size, &disk_size,
+				  oi.contentp ? &content : NULL))
 		return -1;
+	if (oi.typep)
+		*oi.typep = type;
+	if (oi.sizep)
+		*oi.sizep = size;
+	if (oi.disk_sizep)
+		*oi.disk_sizep = disk_size;
+	if (oi.delta_base_oid)
+		oidclr(oi.delta_base_oid,
+		       data->source->base.odb->repo->hash_algo);
+	if (oi.contentp)
+		*oi.contentp = content;
+	if (oi.mtimep)
+		*oi.mtimep = 0;
+	if (oi.source_infop)
+		oi.source_infop->source = &data->source->base;
 	return data->cb(oid, &oi, data->cb_data);
 }
 
 static int cloud_each_group(const struct odb_segment_group_entry *entry,
 			    void *cb_data)
 {
-	return cloud_each_oid(cb_data, &entry->oid);
+	return cloud_each_entry(cb_data, entry);
 }
 
 static int cloud_for_each_object(struct odb_source *base,
@@ -680,6 +738,7 @@ static int cloud_for_each_object(struct odb_source *base,
 	if (!(opts->flags & ODB_FOR_EACH_OBJECT_PROMISOR_ONLY) &&
 	    !((opts->flags & ODB_FOR_EACH_OBJECT_LOCAL_ONLY) && !base->local)) {
 		for (size_t i = 0; i < source->readers_nr; i++) {
+			data.reader_nr = i;
 			int ret = odb_segment_group_for_each(&source->groups[i],
 							     cloud_each_group, &data);
 
@@ -810,7 +869,8 @@ static void sha256_hex(const void *data, size_t size,
 }
 
 static int artifact_file_key(struct odb_source_cloud *source, const char *path,
-			     const char *suffix, struct strbuf *contents,
+			     const char *token, const char *suffix,
+			     struct strbuf *contents,
 			     struct strbuf *key, uint64_t *bytes)
 {
 	struct stat st;
@@ -835,7 +895,8 @@ static int artifact_file_key(struct odb_source_cloud *source, const char *path,
 		goto out;
 	sha256_hex(contents->buf, contents->len, hash);
 	strbuf_reset(key);
-	strbuf_addf(key, "%s/objects/%s.%s", source->prefix.buf, hash, suffix);
+	strbuf_addf(key, "%s/transactions/%s/objects/%s.%s",
+		    source->prefix.buf, token, hash, suffix);
 	*bytes = contents->len;
 	ret = 0;
 out:
@@ -843,14 +904,15 @@ out:
 }
 
 static int upload_immutable(struct odb_source_cloud *source, const char *path,
-			    const char *suffix, struct strbuf *key,
+			    const char *token, const char *suffix,
+			    struct strbuf *key,
 			    uint64_t *bytes)
 {
 	struct s3_response response = S3_RESPONSE_INIT;
 	struct strbuf contents = STRBUF_INIT;
 	int ret = -1;
 
-	if (artifact_file_key(source, path, suffix, &contents, key, bytes))
+	if (artifact_file_key(source, path, token, suffix, &contents, key, bytes))
 		goto out;
 	if (s3_client_put(&source->client, key->buf, contents.buf, contents.len,
 			  NULL, 1, &response))
@@ -1009,24 +1071,128 @@ static int manifest_protects_key(const struct odb_cloud_manifest *manifest,
 	if (manifest_references_key(manifest, key))
 		return 1;
 	for (size_t i = 0; i < manifest->pending_nr; i++)
-		if (manifest->pending[i].state == ODB_CLOUD_PENDING_ACTIVE &&
+		if (manifest->pending[i].state != ODB_CLOUD_PENDING_DELETING &&
 		    (!strcmp(manifest->pending[i].data_key, key) ||
 		     !strcmp(manifest->pending[i].index_key, key)))
 			return 1;
 	return 0;
 }
 
-static int recover_pending_artifacts(struct odb_source_cloud *source)
+static int collect_ref_oid(const struct reference *ref, void *cb_data)
+{
+	struct oidset *oids = cb_data;
+
+	if (!is_null_oid(ref->oid))
+		oidset_insert(oids, ref->oid);
+	return 0;
+}
+
+static int collect_reflog_oid(const char *refname UNUSED,
+			      struct object_id *old_oid,
+			      struct object_id *new_oid,
+			      const char *committer UNUSED,
+			      timestamp_t timestamp UNUSED, int tz UNUSED,
+			      const char *msg UNUSED, void *cb_data)
+{
+	struct oidset *oids = cb_data;
+
+	if (!is_null_oid(old_oid))
+		oidset_insert(oids, old_oid);
+	if (!is_null_oid(new_oid))
+		oidset_insert(oids, new_oid);
+	return 0;
+}
+
+struct collect_reflog_data {
+	struct ref_store *refs;
+	struct oidset *oids;
+};
+
+static int collect_reflog(const char *refname, void *cb_data)
+{
+	struct collect_reflog_data *data = cb_data;
+
+	return refs_for_each_reflog_ent(data->refs, refname,
+					collect_reflog_oid, data->oids);
+}
+
+static int collect_ref_evidence(struct odb_source_cloud *source,
+				struct oidset *oids)
+{
+	struct ref_store *refs = get_main_ref_store(source->base.odb->repo);
+	struct collect_reflog_data data = { .refs = refs, .oids = oids };
+
+	if (refs_for_each_ref(refs, collect_ref_oid, oids) ||
+	    refs_for_each_reflog(refs, collect_reflog, &data))
+		return error(_("unable to inspect refs for cloud ODB recovery"));
+	return 0;
+}
+
+static int pending_artifact_has_ref(
+	struct odb_source_cloud *source,
+	const struct odb_cloud_pending_artifact *pending,
+	const struct oidset *ref_oids, int *found)
+{
+	struct odb_cloud_artifact artifact = {
+		.data_key = pending->data_key,
+		.index_key = pending->index_key,
+		.data_bytes = pending->data_bytes,
+		.index_bytes = pending->index_bytes,
+	};
+	struct odb_segment_group reader = { 0 };
+	struct s3_response index = S3_RESPONSE_INIT;
+	struct cloud_range *range = NULL;
+	struct strbuf label = STRBUF_INIT;
+	unsigned char header[CLOUD_GROUP_HEADER_SIZE];
+	int ret = -1;
+
+	*found = 0;
+	if (cloud_get_index(source, &artifact, &index) ||
+	    s3_client_read_range(&source->client, artifact.data_key,
+				 artifact.data_bytes, 0, CLOUD_GROUP_HEADER_SIZE,
+				 header))
+		goto out;
+	range = cloud_range_new(source, artifact.data_key, artifact.data_bytes);
+	strbuf_addf(&label, "pending/%s", pending->token);
+	if (odb_segment_group_open_reader(
+		    &reader, label.buf, artifact.data_bytes, header,
+		    CLOUD_GROUP_HEADER_SIZE, index.body.buf, index.body.len,
+		    source->base.odb->repo->hash_algo, cloud_range_read,
+		    cloud_range_release, range))
+		goto out;
+	range = NULL;
+	for (size_t i = 0; i < reader.entries_nr; i++)
+		if (oidset_contains(ref_oids, &reader.entries[i].oid)) {
+			*found = 1;
+			break;
+		}
+	ret = 0;
+out:
+	odb_segment_group_close(&reader);
+	cloud_range_release(range);
+	strbuf_release(&label);
+	s3_response_release(&index);
+	return ret;
+}
+
+static int recover_pending_artifacts(struct odb_source_cloud *source,
+				     int reconcile_published)
 {
 	char gc_token[33] = "";
+	struct oidset ref_oids = OIDSET_INIT;
 	time_t current_time = time(NULL);
 	uint64_t now;
 	uint64_t grace = git_env_ulong(
 		"GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS",
 		CLOUD_PENDING_GRACE_SECONDS);
+	uint64_t lease_seconds = git_env_ulong(
+		"GIT_TEST_CLOUD_ODB_GC_LEASE_SECONDS",
+		CLOUD_GC_LEASE_SECONDS);
+	int final_ret = -1;
 
-	if (current_time <= 0)
-		return -1;
+	if (current_time <= 0 ||
+	    (reconcile_published && collect_ref_evidence(source, &ref_oids)))
+		goto out;
 	now = (uint64_t)current_time;
 	for (unsigned attempt = 0; attempt < CLOUD_CAS_ATTEMPTS; attempt++) {
 		struct odb_cloud_manifest manifest = ODB_CLOUD_MANIFEST_INIT;
@@ -1038,36 +1204,77 @@ static int recover_pending_artifacts(struct odb_source_cloud *source)
 		if (cloud_get_manifest(source, &manifest, &etag) ||
 		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
-		for (size_t i = 0; i < manifest.pending_nr; i++) {
+		for (size_t i = 0; i < manifest.pending_nr;) {
 			struct odb_cloud_pending_artifact *pending =
 				&manifest.pending[i];
+			int referenced = 0;
 
-			if (pending->state == ODB_CLOUD_PENDING_DELETING)
+			if (pending->state == ODB_CLOUD_PENDING_PUBLISHED) {
+				if (!reconcile_published) {
+					i++;
+					continue;
+				}
+				if (pending_artifact_has_ref(source, pending, &ref_oids,
+							     &referenced))
+					goto attempt_out;
+				if (referenced) {
+					char token[33];
+
+					strlcpy(token, pending->token, sizeof(token));
+					odb_cloud_manifest_remove_pending(&manifest, token);
+					changed = 1;
+					continue;
+				}
+				if (pending_is_expired(pending, now, grace)) {
+					if (odb_cloud_manifest_remove_artifact(
+						    &manifest, pending->data_key,
+						    pending->index_key))
+						goto attempt_out;
+					pending->state = ODB_CLOUD_PENDING_DELETING;
+					changed = 1;
+					has_recovery = 1;
+				}
+			} else if (pending->state == ODB_CLOUD_PENDING_DELETING)
 				has_recovery = 1;
 			else if (pending_is_expired(pending, now, grace)) {
 				has_recovery = 1;
 				pending->state = ODB_CLOUD_PENDING_DELETING;
 				changed = 1;
 			}
+			i++;
 		}
-		if (!manifest.gc_token && !has_recovery) {
+		if (!manifest.gc_token && !has_recovery && !changed) {
 			ret = 0;
 			goto attempt_out;
 		}
-		if (!manifest.gc_token) {
+		if (has_recovery && !manifest.gc_token) {
 			if (!*gc_token && make_cloud_token(gc_token))
 				goto attempt_out;
 			manifest.gc_token = xstrdup(gc_token);
+			manifest.gc_created_at = now;
 			changed = 1;
 		}
-		if (strcmp(manifest.gc_token, gc_token)) {
-			error(_("cloud ODB recovery is fenced by another GC owner"));
-			goto attempt_out;
+		if (manifest.gc_token && strcmp(manifest.gc_token, gc_token)) {
+			if (manifest.gc_created_at <= now &&
+			    now - manifest.gc_created_at >= lease_seconds) {
+				if (!*gc_token && make_cloud_token(gc_token))
+					goto attempt_out;
+				free(manifest.gc_token);
+				manifest.gc_token = xstrdup(gc_token);
+				manifest.gc_created_at = now;
+				changed = 1;
+			} else {
+				ret = 0;
+				goto attempt_out;
+			}
 		}
 		if (changed) {
 			ret = cloud_cas_manifest(source, &manifest, &etag);
-			if (!ret)
+			if (!ret) {
+				if (manifest.gc_token)
+					cloud_failpoint("after-gc-lease");
 				ret = 2;
+			}
 			goto attempt_out;
 		}
 		for (size_t i = 0; i < manifest.pending_nr; i++) {
@@ -1089,19 +1296,34 @@ static int recover_pending_artifacts(struct odb_source_cloud *source)
 				odb_cloud_manifest_remove_pending(
 					&manifest, manifest.pending[i - 1].token);
 		FREE_AND_NULL(manifest.gc_token);
+		manifest.gc_created_at = 0;
 		ret = cloud_cas_manifest(source, &manifest, &etag);
 attempt_out:
 		strbuf_release(&etag);
 		odb_cloud_manifest_release(&manifest);
 		if (ret == 2)
 			continue;
-		if (!ret)
-			return 0;
+		if (!ret) {
+			final_ret = 0;
+			goto out;
+		}
 		if (ret < 0)
-			return -1;
+			goto out;
 		sleep_millisec(5 + (getpid() + attempt * 17) % 46);
 	}
-	return error(_("cloud ODB recovery CAS retry limit exceeded"));
+	error(_("cloud ODB recovery CAS retry limit exceeded"));
+out:
+	oidset_clear(&ref_oids);
+	return final_ret;
+}
+
+int odb_source_cloud_recover(struct odb_source_cloud *source)
+{
+	if (recover_pending_artifacts(source, 1))
+		return -1;
+	/* Recovery may remove an unreferenced artifact from any ordinal. */
+	cloud_clear_readers(source);
+	return cloud_load(source);
 }
 
 static int write_group_artifacts(struct odb_source_cloud *source,
@@ -1191,8 +1413,7 @@ static int publish_artifact(struct odb_source_cloud *source, const char *token,
 		    odb_cloud_manifest_add(&manifest, data_key, data_bytes,
 					   index_key, index_bytes))
 			goto attempt_out;
-		if (odb_cloud_manifest_remove_pending(&manifest, token))
-			BUG("cloud ODB pending artifact disappeared");
+		pending->state = ODB_CLOUD_PENDING_PUBLISHED;
 		cloud_failpoint("before-cas");
 		attempt_ret = cloud_cas_manifest(source, &manifest, &etag);
 		if (!attempt_ret) {
@@ -1257,18 +1478,20 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 		goto out;
 	created_at = time(NULL);
 	if (created_at <= 0 || make_cloud_token(pending_token) ||
-	    artifact_file_key(source, data_path.buf, "gsg", &artifact_contents,
+	    artifact_file_key(source, data_path.buf, pending_token, "gsg",
+			      &artifact_contents,
 			      &data_key, &data_bytes) ||
-	    artifact_file_key(source, index_path.buf, "gsi", &artifact_contents,
+	    artifact_file_key(source, index_path.buf, pending_token, "gsi",
+			      &artifact_contents,
 			      &index_key, &index_bytes) ||
 	    register_pending_artifact(source, pending_token, (uint64_t)created_at,
 				      data_key.buf, data_bytes,
 				      index_key.buf, index_bytes))
 		goto out;
 	cloud_failpoint("before-artifact-upload");
-	if (upload_immutable(source, data_path.buf, "gsg", &data_key,
+	if (upload_immutable(source, data_path.buf, pending_token, "gsg", &data_key,
 			     &data_bytes) ||
-	    upload_immutable(source, index_path.buf, "gsi", &index_key,
+	    upload_immutable(source, index_path.buf, pending_token, "gsi", &index_key,
 			     &index_bytes))
 		goto out;
 	cloud_failpoint("after-artifact-upload");
@@ -1474,7 +1697,9 @@ static void cloud_prepare(struct odb_source *base, enum odb_prepare_flags flags)
 						       base);
 
 	odb_source_prepare(&source->fallback->base, flags);
-	if ((flags & ODB_PREPARE_FLUSH_CACHES) && cloud_load(source))
+	if (odb_source_cloud_recover(source))
+		warning(_("unable to reconcile cloud ODB publications"));
+	else if ((flags & ODB_PREPARE_FLUSH_CACHES) && cloud_load(source))
 		die(_("unable to reload cloud ODB"));
 }
 
@@ -1535,7 +1760,7 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->base.write_alternate = cloud_write_alternate;
 	source->base.optimize = cloud_optimize;
 	source->base.optimize_required = cloud_optimize_required;
-	if (recover_pending_artifacts(source))
+	if (recover_pending_artifacts(source, 0))
 		warning(_("unable to finish cloud ODB pending-artifact recovery"));
 	if (cloud_load(source))
 		die(_("unable to open cloud ODB at '%s'"), path);

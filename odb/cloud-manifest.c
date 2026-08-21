@@ -69,6 +69,46 @@ int odb_cloud_manifest_key_is_artifact(const char *key, const char *prefix,
 		!strcmp(hash + GIT_SHA256_HEXSZ + 1, suffix);
 }
 
+int odb_cloud_manifest_key_is_transaction_artifact(
+	const char *key, const char *prefix, const char *token,
+	const char *suffix)
+{
+	struct strbuf transaction_prefix = STRBUF_INIT;
+	int ret;
+
+	strbuf_addf(&transaction_prefix, "%s/transactions/%s", prefix, token);
+	ret = odb_cloud_manifest_key_is_artifact(
+		key, transaction_prefix.buf, suffix);
+	strbuf_release(&transaction_prefix);
+	return ret;
+}
+
+int odb_cloud_manifest_key_is_scoped_artifact(const char *key,
+					      const char *prefix,
+					      const char *suffix)
+{
+	struct strbuf transaction_root = STRBUF_INIT;
+	char token[33];
+	const char *remainder;
+	int ret = 0;
+
+	if (odb_cloud_manifest_key_is_artifact(key, prefix, suffix))
+		return 1;
+	strbuf_addf(&transaction_root, "%s/transactions/", prefix);
+	if (!skip_prefix(key, transaction_root.buf, &remainder) ||
+	    strlen(remainder) < 33 || remainder[32] != '/')
+		goto out;
+	memcpy(token, remainder, 32);
+	token[32] = '\0';
+	if (!valid_token(token))
+		goto out;
+	ret = odb_cloud_manifest_key_is_transaction_artifact(
+		key, prefix, token, suffix);
+out:
+	strbuf_release(&transaction_root);
+	return ret;
+}
+
 int odb_cloud_manifest_add(struct odb_cloud_manifest *manifest,
 			   const char *data_key, uint64_t data_bytes,
 			   const char *index_key, uint64_t index_bytes)
@@ -107,6 +147,7 @@ int odb_cloud_manifest_add_pending(
 
 	if (!valid_token(token) || !created_at ||
 	    (state != ODB_CLOUD_PENDING_ACTIVE &&
+	     state != ODB_CLOUD_PENDING_PUBLISHED &&
 	     state != ODB_CLOUD_PENDING_DELETING) ||
 	    !valid_key(data_key) || !valid_key(index_key) ||
 	    !data_bytes || !index_bytes ||
@@ -123,6 +164,26 @@ int odb_cloud_manifest_add_pending(
 	pending->index_key = xstrdup(index_key);
 	pending->index_bytes = index_bytes;
 	return 0;
+}
+
+int odb_cloud_manifest_remove_artifact(struct odb_cloud_manifest *manifest,
+				       const char *data_key,
+				       const char *index_key)
+{
+	for (size_t i = 0; i < manifest->artifacts_nr; i++) {
+		struct odb_cloud_artifact *artifact = &manifest->artifacts[i];
+
+		if (strcmp(artifact->data_key, data_key) ||
+		    strcmp(artifact->index_key, index_key))
+			continue;
+		free(artifact->data_key);
+		free(artifact->index_key);
+		MOVE_ARRAY(artifact, artifact + 1,
+			   manifest->artifacts_nr - i - 1);
+		manifest->artifacts_nr--;
+		return 0;
+	}
+	return 1;
 }
 
 int odb_cloud_manifest_remove_pending(struct odb_cloud_manifest *manifest,
@@ -194,9 +255,13 @@ int odb_cloud_manifest_parse(struct odb_cloud_manifest *manifest,
 
 		string_list_clear(&fields, 0);
 		string_list_split(&fields, lines.items[i].string, " ", -1);
-		if (fields.nr == 2 && !strcmp(fields.items[0].string, "gc")) {
+		if ((fields.nr == 2 || fields.nr == 3) &&
+		    !strcmp(fields.items[0].string, "gc")) {
 			if (manifest->gc_token ||
-			    !valid_token(fields.items[1].string))
+			    !valid_token(fields.items[1].string) ||
+			    (fields.nr == 3 &&
+			     parse_u64(fields.items[2].string,
+				       &manifest->gc_created_at)))
 				goto invalid;
 			manifest->gc_token = xstrdup(fields.items[1].string);
 		} else if (fields.nr == 5 &&
@@ -214,6 +279,8 @@ int odb_cloud_manifest_parse(struct odb_cloud_manifest *manifest,
 
 			if (!strcmp(fields.items[3].string, "active"))
 				state = ODB_CLOUD_PENDING_ACTIVE;
+			else if (!strcmp(fields.items[3].string, "published"))
+				state = ODB_CLOUD_PENDING_PUBLISHED;
 			else if (!strcmp(fields.items[3].string, "deleting"))
 				state = ODB_CLOUD_PENDING_DELETING;
 			else
@@ -258,7 +325,8 @@ void odb_cloud_manifest_write(const struct odb_cloud_manifest *manifest,
 			    artifact->index_key, artifact->index_bytes);
 	}
 	if (manifest->gc_token)
-		strbuf_addf(out, "gc %s\n", manifest->gc_token);
+		strbuf_addf(out, "gc %s %"PRIu64"\n", manifest->gc_token,
+			    manifest->gc_created_at);
 	for (size_t i = 0; i < manifest->pending_nr; i++) {
 		const struct odb_cloud_pending_artifact *pending =
 			&manifest->pending[i];
@@ -266,8 +334,9 @@ void odb_cloud_manifest_write(const struct odb_cloud_manifest *manifest,
 		strbuf_addf(out,
 			    "pending %s %"PRIu64" %s %s %"PRIu64" %s %"PRIu64"\n",
 			    pending->token, pending->created_at,
-			    pending->state == ODB_CLOUD_PENDING_ACTIVE ?
-				    "active" : "deleting",
+			    pending->state == ODB_CLOUD_PENDING_ACTIVE ? "active" :
+			    pending->state == ODB_CLOUD_PENDING_PUBLISHED ?
+				    "published" : "deleting",
 			    pending->data_key, pending->data_bytes,
 			    pending->index_key, pending->index_bytes);
 	}

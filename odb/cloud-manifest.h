@@ -13,6 +13,7 @@ struct odb_cloud_artifact {
 
 enum odb_cloud_pending_state {
 	ODB_CLOUD_PENDING_ACTIVE = 0,
+	ODB_CLOUD_PENDING_PUBLISHED,
 	ODB_CLOUD_PENDING_DELETING,
 };
 
@@ -30,6 +31,7 @@ struct odb_cloud_manifest {
 	const struct git_hash_algo *hash_algo;
 	uint64_t generation;
 	char *gc_token;
+	uint64_t gc_created_at;
 	struct odb_cloud_artifact *artifacts;
 	size_t artifacts_nr;
 	size_t artifacts_alloc;
@@ -55,8 +57,17 @@ struct odb_cloud_pending_artifact *odb_cloud_manifest_find_pending(
 	struct odb_cloud_manifest *manifest, const char *token);
 int odb_cloud_manifest_remove_pending(struct odb_cloud_manifest *manifest,
 				      const char *token);
+int odb_cloud_manifest_remove_artifact(struct odb_cloud_manifest *manifest,
+				       const char *data_key,
+				       const char *index_key);
 int odb_cloud_manifest_key_is_artifact(const char *key, const char *prefix,
 				       const char *suffix);
+int odb_cloud_manifest_key_is_transaction_artifact(
+	const char *key, const char *prefix, const char *token,
+	const char *suffix);
+int odb_cloud_manifest_key_is_scoped_artifact(const char *key,
+					      const char *prefix,
+					      const char *suffix);
 int odb_cloud_manifest_parse(struct odb_cloud_manifest *manifest,
 			     const void *data, size_t size,
 			     const struct git_hash_algo *expected_hash_algo);
