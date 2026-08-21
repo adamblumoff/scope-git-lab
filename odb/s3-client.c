@@ -84,14 +84,13 @@ static void append_request_metric(enum s3_request_method method,
 	uint64_t requested = range_length(range);
 	int fd;
 
-	if (!path || !*path)
+	if (!path || !*path || !run_id)
 		return;
 	strbuf_addf(&line,
 		    "{\"schema\":\"git-cloud-odb-call/v1\","
 		    "\"pid\":%"PRIuMAX,
 		    (uintmax_t)getpid());
-	if (run_id)
-		strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
+	strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
 	strbuf_addf(&line,
 		    ",\"method\":\"%s\","
 		    "\"status\":%ld,\"requests\":1,\"gets\":%d,"
@@ -815,15 +814,25 @@ static size_t response_header(char *ptr, size_t size, size_t nmemb, void *data)
 	return bytes;
 }
 
+struct s3_download {
+	struct strbuf *body;
+	size_t maximum;
+	int exceeded;
+};
+
 static size_t response_body(char *ptr, size_t size, size_t nmemb, void *data)
 {
-	struct strbuf *body = data;
+	struct s3_download *download = data;
 	size_t bytes;
 
 	if (size && nmemb > SIZE_MAX / size)
 		return 0;
 	bytes = size * nmemb;
-	strbuf_add(body, ptr, bytes);
+	if (bytes > download->maximum - download->body->len) {
+		download->exceeded = 1;
+		return 0;
+	}
+	strbuf_add(download->body, ptr, bytes);
 	return bytes;
 }
 
@@ -864,11 +873,16 @@ static int s3_request(struct s3_client *client, const char *key,
 		      enum s3_request_method method,
 		      const void *data, size_t size,
 		      const char *if_match, int if_none_match,
-		      const char *range, struct s3_response *response)
+		      const char *range, size_t maximum_response_size,
+		      struct s3_response *response)
 {
 	struct curl_slist *headers = NULL;
 	struct curl_slist *proxy_headers = NULL;
 	struct s3_upload upload = { .data = data, .len = size };
+	struct s3_download download = {
+		.body = &response->body,
+		.maximum = maximum_response_size,
+	};
 	struct strbuf url = STRBUF_INIT;
 	struct strbuf header = STRBUF_INIT;
 	curl_off_t transferred;
@@ -999,7 +1013,7 @@ static int s3_request(struct s3_client *client, const char *key,
 	curl_easy_setopt(client->curl, CURLOPT_HEADERFUNCTION, response_header);
 	curl_easy_setopt(client->curl, CURLOPT_HEADERDATA, response);
 	curl_easy_setopt(client->curl, CURLOPT_WRITEFUNCTION, response_body);
-	curl_easy_setopt(client->curl, CURLOPT_WRITEDATA, &response->body);
+	curl_easy_setopt(client->curl, CURLOPT_WRITEDATA, &download);
 	curl_easy_setopt(client->curl, CURLOPT_NOBODY,
 			 method == S3_REQUEST_HEAD ? 1L : 0L);
 	curl_easy_setopt(client->curl, CURLOPT_UPLOAD,
@@ -1029,8 +1043,11 @@ static int s3_request(struct s3_client *client, const char *key,
 			      &transferred) == CURLE_OK && transferred > 0)
 		response->downloaded_bytes = transferred;
 	if (curl_result != CURLE_OK) {
-		error(_("S3 request failed: %s"),
-		      curl_easy_strerror(curl_result));
+		if (download.exceeded)
+			error(_("S3 response exceeds the configured size limit"));
+		else
+			error(_("S3 request failed: %s"),
+			      curl_easy_strerror(curl_result));
 		goto out;
 	}
 	client->metrics.requests++;
@@ -1073,21 +1090,29 @@ int s3_client_put(struct s3_client *client, const char *key,
 	if (size > maximum_signed_value_of_type(curl_off_t))
 		return error(_("S3 upload is too large"));
 	return s3_request(client, key, S3_REQUEST_PUT, data, size,
-			  if_match, if_none_match, NULL, response);
+			  if_match, if_none_match, NULL, SIZE_MAX, response);
 }
 
 int s3_client_head(struct s3_client *client, const char *key,
 		   struct s3_response *response)
 {
 	return s3_request(client, key, S3_REQUEST_HEAD, NULL, 0,
-			  NULL, 0, NULL, response);
+			  NULL, 0, NULL, SIZE_MAX, response);
 }
 
 int s3_client_get(struct s3_client *client, const char *key,
 		  struct s3_response *response)
 {
 	return s3_request(client, key, S3_REQUEST_GET, NULL, 0,
-			  NULL, 0, NULL, response);
+			  NULL, 0, NULL, SIZE_MAX, response);
+}
+
+int s3_client_get_limited(struct s3_client *client, const char *key,
+			  size_t maximum_size,
+			  struct s3_response *response)
+{
+	return s3_request(client, key, S3_REQUEST_GET, NULL, 0,
+			  NULL, 0, NULL, maximum_size, response);
 }
 
 int s3_client_get_range(struct s3_client *client, const char *key,
@@ -1098,14 +1123,15 @@ int s3_client_get_range(struct s3_client *client, const char *key,
 	uint64_t last;
 	int ret;
 
-	if (!length || offset > UINT64_MAX - (length - 1))
+	if (!length || length > SIZE_MAX ||
+	    offset > UINT64_MAX - (length - 1))
 		return error(_("invalid S3 byte range"));
 	last = offset + length - 1;
 	if (last > maximum_signed_value_of_type(curl_off_t))
 		return error(_("S3 byte range is too large"));
 	strbuf_addf(&range, "%"PRIu64"-%"PRIu64, offset, last);
 	ret = s3_request(client, key, S3_REQUEST_GET, NULL, 0,
-			 NULL, 0, range.buf, response);
+			 NULL, 0, range.buf, (size_t)length, response);
 	if (!ret)
 		client->metrics.range_requested_bytes += length;
 	strbuf_release(&range);
@@ -1143,5 +1169,5 @@ int s3_client_delete(struct s3_client *client, const char *key,
 		     struct s3_response *response)
 {
 	return s3_request(client, key, S3_REQUEST_DELETE, NULL, 0,
-			  NULL, 0, NULL, response);
+			  NULL, 0, NULL, SIZE_MAX, response);
 }

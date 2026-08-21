@@ -67,14 +67,13 @@ static void cloud_metric_event(struct odb_source_cloud *source UNUSED,
 	struct strbuf line = STRBUF_INIT;
 	int fd;
 
-	if (!path || !*path)
+	if (!path || !*path || !run_id)
 		return;
 	strbuf_addf(&line,
 		    "{\"schema\":\"git-cloud-odb-logical/v1\","
 		    "\"pid\":%"PRIuMAX,
 		    (uintmax_t)getpid());
-	if (run_id)
-		strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
+	strbuf_addf(&line, ",\"runId\":\"%s\"", run_id);
 	strbuf_addf(&line,
 		    ",\"layout\":\"group\","
 		    "\"objectReads\":%"PRIu64",\"usefulBytes\":%"PRIu64","
@@ -196,7 +195,8 @@ static int cloud_get_manifest(struct odb_source_cloud *source,
 	struct s3_response response = S3_RESPONSE_INIT;
 	int ret = -1;
 
-	if (s3_client_get(&source->client, source->manifest_key.buf, &response))
+	if (s3_client_get_limited(&source->client, source->manifest_key.buf,
+				  CLOUD_MAX_ARTIFACT_BYTES, &response))
 		goto out;
 	if (response.http_status == 404) {
 		odb_cloud_manifest_init(manifest,
@@ -222,8 +222,10 @@ static int cloud_get_index(struct odb_source_cloud *source,
 			   const struct odb_cloud_artifact *artifact,
 			   struct s3_response *response)
 {
-	if (artifact->index_bytes > SIZE_MAX ||
-	    s3_client_get(&source->client, artifact->index_key, response) ||
+	if (artifact->index_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
+	    artifact->index_bytes > SIZE_MAX ||
+	    s3_client_get_limited(&source->client, artifact->index_key,
+				  (size_t)artifact->index_bytes, response) ||
 	    response->http_status != 200 ||
 	    response->body.len != artifact->index_bytes)
 		return error(_("unable to read cloud ODB index"));
@@ -689,7 +691,8 @@ static int upload_immutable(struct odb_source_cloud *source, const char *path,
 			  NULL, 1, &response))
 		goto out;
 	if (conflict_status(response.http_status)) {
-		if (s3_client_get(&source->client, key->buf, &response) ||
+		if (s3_client_get_limited(&source->client, key->buf,
+					  contents.len, &response) ||
 		    response.http_status != 200 ||
 		    response.body.len != contents.len ||
 		    memcmp(response.body.buf, contents.buf, contents.len))
@@ -794,6 +797,10 @@ static int publish_artifact(struct odb_source_cloud *source,
 			goto attempt_out;
 		manifest.generation++;
 		odb_cloud_manifest_write(&manifest, &serialized);
+		if (serialized.len > CLOUD_MAX_ARTIFACT_BYTES) {
+			error(_("cloud ODB manifest exceeds the bounded-artifact policy"));
+			goto attempt_out;
+		}
 		cloud_failpoint("before-cas");
 		if (s3_client_put(&source->client, source->manifest_key.buf,
 				  serialized.buf, serialized.len,

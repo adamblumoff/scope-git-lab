@@ -116,7 +116,7 @@ int repo_read_loose_object_map(struct repository *repo)
 	odb_prepare_alternates(repo->objects);
 
 	for (source = repo->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct odb_source_files *files = odb_source_files_delegate(source);
 		if (load_one_loose_object_map(repo, files->loose) < 0) {
 			return -1;
 		}
@@ -126,7 +126,8 @@ int repo_read_loose_object_map(struct repository *repo)
 
 int repo_write_loose_object_map(struct repository *repo)
 {
-	struct odb_source_files *files = odb_source_files_downcast(repo->objects->sources);
+	struct odb_source_files *files =
+		odb_source_files_delegate(repo->objects->sources);
 	kh_oid_map_t *map = files->loose->map->to_compat;
 	struct lock_file lock;
 	int fd;
@@ -236,7 +237,7 @@ int repo_loose_object_map_oid(struct repository *repo,
 	khiter_t pos;
 
 	for (source = repo->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct odb_source_files *files = odb_source_files_delegate(source);
 		struct loose_object_map *loose_map = files->loose->map;
 		if (!loose_map)
 			continue;

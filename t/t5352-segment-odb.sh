@@ -44,6 +44,17 @@ test_expect_success 'import files ODB into a segment store' '
 	test_path_is_dir repo/.git/objects/pack
 '
 
+test_expect_success RUST 'compatibility map uses the segment files delegate' '
+	git clone --quiet --bare --no-local \
+		"file://$(pwd)/repo" compat-segment.git &&
+	git -C compat-segment.git segment-store import &&
+	git -C compat-segment.git config core.repositoryformatversion 1 &&
+	git -C compat-segment.git config extensions.objectformat sha1 &&
+	git -C compat-segment.git config extensions.compatobjectformat sha256 &&
+	git -C compat-segment.git rev-parse --git-dir >compat.gitdir &&
+	test_file_not_empty compat.gitdir
+'
+
 test_expect_success 'stats describe the imported segment store' '
 	object_count=$(sed -n "$=" objects.before) &&
 	git -C repo segment-store stats >stats &&

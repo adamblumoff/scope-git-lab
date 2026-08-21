@@ -93,6 +93,9 @@ int s3_client_head(struct s3_client *client, const char *key,
 		   struct s3_response *response);
 int s3_client_get(struct s3_client *client, const char *key,
 		  struct s3_response *response);
+int s3_client_get_limited(struct s3_client *client, const char *key,
+			  size_t maximum_size,
+			  struct s3_response *response);
 int s3_client_get_range(struct s3_client *client, const char *key,
 			uint64_t offset, uint64_t length,
 			struct s3_response *response);

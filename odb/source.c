@@ -64,3 +64,19 @@ void odb_source_release(struct odb_source *source)
 		return;
 	free(source->path);
 }
+
+struct odb_source_files *odb_source_files_delegate(struct odb_source *source)
+{
+	switch (source->type) {
+	case ODB_SOURCE_FILES:
+		return odb_source_files_downcast(source);
+	case ODB_SOURCE_SEGMENT:
+		return odb_source_segment_downcast(source)->fallback;
+#ifdef USE_S3
+	case ODB_SOURCE_CLOUD:
+		return container_of(source, struct odb_source_cloud, base)->fallback;
+#endif
+	default:
+		BUG("source type '%d' has no files delegate", source->type);
+	}
+}
