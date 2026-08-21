@@ -55,6 +55,9 @@ CLOUD_METADATA_RESERVATION_BYTES = int(
 REQUEST_TIMEOUT_SECONDS = float(
     os.environ.get("CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS", "30")
 )
+RECOVERY_TIMEOUT_SECONDS = float(
+    os.environ.get("CLOUD_BENCH_RECOVERY_TIMEOUT_SECONDS", "420")
+)
 ALLOW_FAILPOINTS = env_bool("CLOUD_BENCH_ALLOW_FAILPOINTS")
 
 if min(
@@ -67,8 +70,8 @@ if min(
     CLOUD_METADATA_RESERVATION_BYTES,
 ) <= 0:
     raise ValueError("request limits must be positive")
-if REQUEST_TIMEOUT_SECONDS <= 0:
-    raise ValueError("request timeout must be positive")
+if REQUEST_TIMEOUT_SECONDS <= 0 or RECOVERY_TIMEOUT_SECONDS <= 0:
+    raise ValueError("request and recovery timeouts must be positive")
 
 METADATA_REQUEST_SLOTS = MAX_CLOUD_METADATA_BYTES // CLOUD_METADATA_RESERVATION_BYTES
 if METADATA_REQUEST_SLOTS <= 0:
@@ -457,7 +460,7 @@ class GitHandler(BaseHTTPRequestHandler):
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=RECOVERY_TIMEOUT_SECONDS,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as error:

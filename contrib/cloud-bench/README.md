@@ -36,17 +36,21 @@ conditional manifest update. Publication keeps the journal record in a
 `published` state until a current ref or reflog proves that its ref transaction
 committed. The owner-only recovery helper walks the complete object graph from
 those tips, so separately published commits, trees, and blobs remain protected.
-An expired published record with no reachable object is removed from the visible
-manifest before its objects are deleted, covering a crash after object
-publication but before ref commit. Downloaded indexes must match the SHA-256 in
-their content-addressed keys. Recovery holds an expiring manifest GC
+Ref-confirmed records are finalized, but an unconfirmed `published` record is
+retained without deletion: absence from a ref snapshot cannot fence a concurrent
+ref commit. Destructive published-artifact GC therefore remains follow-up work
+for a repository-wide ref/recovery protocol. Downloaded indexes must match the
+SHA-256 in their content-addressed keys. Safe pre-publication orphan recovery
+holds an expiring manifest GC
 lease, which blocks new registrations but lets current writers publish. Lease
 takeover is safe because a transaction key is never reused: a delayed prior
 owner can only delete that abandoned transaction, not a later publication of
 the same content. Active records and GC leases receive a one-hour safety window;
 `git cloud-bench recover` performs an explicit recovery pass after repository
 setup. The service runs it after each successful receive; operators may run it
-after a failed receive once the safety window has elapsed.
+after a failed receive once the safety window has elapsed. Cleanup checkpoints
+one orphan per manifest CAS and uses a separate 420-second helper timeout,
+configurable with `CLOUD_BENCH_RECOVERY_TIMEOUT_SECONDS`.
 Local staging cleanup is only a disk-space optimization. Files-backed
 optimization is rejected explicitly after cloud activation because ordinary
 `git repack` would hydrate reachable cloud objects into the local fallback.

@@ -757,6 +757,8 @@ static int cloud_for_each_object(struct odb_source *base,
 
 	if (!(opts->flags & ODB_FOR_EACH_OBJECT_PROMISOR_ONLY) &&
 	    !((opts->flags & ODB_FOR_EACH_OBJECT_LOCAL_ONLY) && !base->local)) {
+		if (cloud_load(source))
+			return -1;
 		for (size_t i = 0; i < source->readers_nr; i++) {
 			data.reader_nr = i;
 			int ret = odb_segment_group_for_each(&source->groups[i],
@@ -780,6 +782,8 @@ static int cloud_count_objects(struct odb_source *base,
 	uint64_t total = 0;
 	unsigned long fallback_count;
 
+	if (cloud_load(source))
+		return -1;
 	for (size_t i = 0; i < source->readers_nr; i++) {
 		uint64_t nr = source->groups[i].entries_nr;
 
@@ -840,6 +844,9 @@ static int cloud_freshen_object(struct odb_source *base,
 	size_t reader_nr;
 
 	if (!cloud_lookup_segment(source, oid, &reader_nr, &entry))
+		return 1;
+	if (!cloud_load(source) &&
+	    !cloud_lookup_segment(source, oid, &reader_nr, &entry))
 		return 1;
 	return odb_source_freshen_object(&source->fallback->base, oid, mtime);
 }
@@ -1254,7 +1261,7 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 	int final_ret = -1;
 
 	if (current_time <= 0 ||
-		    (reconcile_published && collect_reachable_objects(source, &ref_oids)))
+	    (reconcile_published && collect_reachable_objects(source, &ref_oids)))
 		goto out;
 	now = (uint64_t)current_time;
 	for (unsigned attempt = 0; attempt < CLOUD_CAS_ATTEMPTS; attempt++) {
@@ -1288,15 +1295,12 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 					changed = 1;
 					continue;
 				}
-				if (pending_is_expired(pending, now, grace)) {
-					if (odb_cloud_manifest_remove_artifact(
-						    &manifest, pending->data_key,
-						    pending->index_key))
-						goto attempt_out;
-					pending->state = ODB_CLOUD_PENDING_DELETING;
-					changed = 1;
-					has_recovery = 1;
-				}
+				/*
+				 * Absence from a ref snapshot cannot prove that a
+				 * concurrent ref transaction will not commit this
+				 * publication. Leave destructive published GC to a
+				 * future ref-fenced maintenance protocol.
+				 */
 			} else if (pending->state == ODB_CLOUD_PENDING_DELETING)
 				has_recovery = 1;
 			else if (pending_is_expired(pending, now, grace)) {
@@ -1341,23 +1345,25 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 			goto attempt_out;
 		}
 		for (size_t i = 0; i < manifest.pending_nr; i++) {
-			const struct odb_cloud_pending_artifact *pending =
+			struct odb_cloud_pending_artifact *pending =
 				&manifest.pending[i];
+			char token[33];
 
 			if (pending->state != ODB_CLOUD_PENDING_DELETING)
 				continue;
+			strlcpy(token, pending->token, sizeof(token));
 			if (!manifest_protects_key(&manifest, pending->data_key) &&
 			    delete_staging_artifact(source, pending->data_key))
 				goto attempt_out;
 			if (!manifest_protects_key(&manifest, pending->index_key) &&
 			    delete_staging_artifact(source, pending->index_key))
 				goto attempt_out;
+			odb_cloud_manifest_remove_pending(&manifest, token);
+			FREE_AND_NULL(manifest.gc_token);
+			manifest.gc_created_at = 0;
+			ret = cloud_cas_manifest(source, &manifest, &etag);
+			goto attempt_out;
 		}
-		for (size_t i = manifest.pending_nr; i > 0; i--)
-			if (manifest.pending[i - 1].state ==
-			    ODB_CLOUD_PENDING_DELETING)
-				odb_cloud_manifest_remove_pending(
-					&manifest, manifest.pending[i - 1].token);
 		FREE_AND_NULL(manifest.gc_token);
 		manifest.gc_created_at = 0;
 		ret = cloud_cas_manifest(source, &manifest, &etag);

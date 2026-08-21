@@ -147,12 +147,12 @@ GIT_CLOUD_ODB_METRICS_RUN=$published_run \
 GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
 	git -C "$bare" cloud-bench recover
 git -C "$bare" cat-file -e "$fallback_oid^{commit}"
-test "$(grep -c '"method":"DELETE"' "$published_metrics")" -ge 2
-if git -C "$bare" cat-file -e "$unreferenced_oid^{commit}" 2>/dev/null
+if grep -q '"method":"DELETE"' "$published_metrics"
 then
-	echo >&2 "after-cas artifact remained readable after recovery"
+	echo >&2 "unfenced recovery deleted a published artifact"
 	exit 1
 fi
+git -C "$bare" cat-file -e "$unreferenced_oid^{commit}"
 
 stale_oid=$(printf 'stale reader artifact %s\n' "$prefix" |
 	git -C "$bare" hash-object -w --stdin)
