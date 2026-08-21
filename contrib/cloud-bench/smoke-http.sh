@@ -232,6 +232,27 @@ grep "marker does not match" "$trash/marker-mismatch.log" >/dev/null
 cmp "$trash/marker-before" \
 	"$trash/marker-repos/bench.git/objects/cloud-odb"
 
+set +e
+CLOUD_BENCH_REPO_ROOT=$trash/marker-repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/marker-results \
+CLOUD_BENCH_CLOUD_ODB=1 \
+CLOUD_BENCH_RUN_PREFIX=matrix/preserved-marker \
+AWS_ENDPOINT_URL=https://example.invalid \
+AWS_ACCESS_KEY_ID=marker-access \
+AWS_SECRET_ACCESS_KEY=marker-secret \
+AWS_S3_BUCKET_NAME=different-marker-smoke \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_S3_URL_STYLE=path \
+PORT=$port \
+	timeout 2 "$script_dir/cloud-bench" serve \
+		>"$trash/marker-storage-mismatch.log" 2>&1
+marker_status=$?
+set -e
+test "$marker_status" = 1
+grep "marker does not match" "$trash/marker-storage-mismatch.log" >/dev/null
+cmp "$trash/marker-before" \
+	"$trash/marker-repos/bench.git/objects/cloud-odb"
+
 rm "$trash/marker-repos/bench.git/objects/cloud-odb"
 ln -s "$trash/dangling-marker-target" \
 	"$trash/marker-repos/bench.git/objects/cloud-odb"

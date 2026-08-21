@@ -65,7 +65,7 @@ void odb_source_release(struct odb_source *source)
 	free(source->path);
 }
 
-struct odb_source_files *odb_source_files_delegate(struct odb_source *source)
+struct odb_source_files *odb_source_files_try_delegate(struct odb_source *source)
 {
 	switch (source->type) {
 	case ODB_SOURCE_FILES:
@@ -77,6 +77,15 @@ struct odb_source_files *odb_source_files_delegate(struct odb_source *source)
 		return container_of(source, struct odb_source_cloud, base)->fallback;
 #endif
 	default:
-		BUG("source type '%d' has no files delegate", source->type);
+		return NULL;
 	}
+}
+
+struct odb_source_files *odb_source_files_delegate(struct odb_source *source)
+{
+	struct odb_source_files *files = odb_source_files_try_delegate(source);
+
+	if (!files)
+		BUG("source type '%d' has no files delegate", source->type);
+	return files;
 }

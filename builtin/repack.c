@@ -457,7 +457,7 @@ int cmd_repack(int argc,
 	}
 
 	if (!names.nr) {
-		struct odb_source_files *files = odb_source_files_downcast(existing.source);
+		struct odb_source_files *files = odb_source_files_delegate(existing.source);
 
 		if (!po_args.quiet)
 			printf_ln(_("Nothing new to pack."));
@@ -627,7 +627,7 @@ int cmd_repack(int argc,
 		update_server_info(repo, 0);
 
 	if (git_env_bool(GIT_TEST_MULTI_PACK_INDEX, 0)) {
-		struct odb_source_files *files = odb_source_files_downcast(existing.source);
+		struct odb_source_files *files = odb_source_files_delegate(existing.source);
 		unsigned flags = 0;
 
 		if (git_env_bool(GIT_TEST_MULTI_PACK_INDEX_WRITE_INCREMENTAL, 0))

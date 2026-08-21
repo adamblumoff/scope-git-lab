@@ -82,6 +82,7 @@ struct s3_response {
 
 int s3_client_init_from_env(struct s3_client *client);
 void s3_client_release(struct s3_client *client);
+void s3_client_storage_id(const struct s3_client *client, struct strbuf *out);
 
 void s3_response_reset(struct s3_response *response);
 void s3_response_release(struct s3_response *response);

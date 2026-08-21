@@ -22,9 +22,12 @@ environment. `CLOUD_BENCH_CLOUD_ODB=auto` enables the cloud ODB when bucket
 credentials are present; a partial AWS environment fails startup before a
 repository marker is created, and complete credentials are semantically
 validated before the marker is installed. Set it to `0` only for the local HTTP
-smoke test. The POC rejects any canonical object larger than 16 MiB, any receive
+smoke test. The marker binds the repository to a hash of the configured endpoint
+and bucket, so changing either refuses startup instead of presenting the existing
+refs against an empty object store. The POC rejects any canonical object larger than 16 MiB, any receive
 transaction larger than 32 MiB, any publication containing more than 65,536
-objects, and any generated artifact larger than 64 MiB. Those explicit limits
+objects, any generated artifact larger than 64 MiB, any manifest containing more
+than 1,024 artifacts, and more than 64 MiB of aggregate index metadata. Those explicit limits
 keep publication metadata and read streams bounded until the group codec gains
 incremental object compression and inflation. Bounded direct writes use the
 same publication path so objects created by receive hooks remain available.

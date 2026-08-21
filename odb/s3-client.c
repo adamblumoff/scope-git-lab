@@ -19,6 +19,7 @@
 #endif
 
 #define S3_METRICS_MAX_FILE_BYTES (16 * 1024 * 1024)
+#define S3_MAX_WRITE_RESPONSE_BYTES (64 * 1024)
 
 enum s3_request_method {
 	S3_REQUEST_GET,
@@ -905,6 +906,19 @@ static void sha256_hex(const void *data, size_t size,
 	hex[GIT_SHA256_HEXSZ] = '\0';
 }
 
+void s3_client_storage_id(const struct s3_client *client, struct strbuf *out)
+{
+	struct strbuf identity = STRBUF_INIT;
+	char hex[GIT_SHA256_HEXSZ + 1];
+
+	strbuf_addstr(&identity, client->endpoint);
+	strbuf_addch(&identity, '\0');
+	strbuf_addstr(&identity, client->bucket);
+	sha256_hex(identity.buf, identity.len, hex);
+	strbuf_addstr(out, hex);
+	strbuf_release(&identity);
+}
+
 static int append_header(struct curl_slist **headers, const char *header)
 {
 	struct curl_slist *appended = curl_slist_append(*headers, header);
@@ -1152,7 +1166,8 @@ int s3_client_put(struct s3_client *client, const char *key,
 	if (size > maximum_signed_value_of_type(curl_off_t))
 		return error(_("S3 upload is too large"));
 	return s3_request(client, key, S3_REQUEST_PUT, data, size,
-			  if_match, if_none_match, NULL, SIZE_MAX, response);
+			  if_match, if_none_match, NULL,
+			  S3_MAX_WRITE_RESPONSE_BYTES, response);
 }
 
 int s3_client_head(struct s3_client *client, const char *key,

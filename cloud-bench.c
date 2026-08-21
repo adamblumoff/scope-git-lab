@@ -9,7 +9,7 @@
 
 static const char cloud_bench_usage[] =
 	"git-cloud-bench probe --json\n"
-	"git-cloud-bench validate-config";
+	"git-cloud-bench validate-config [--print-storage-id]";
 
 static const char race_manifest_one[] =
 	"git-cloud-probe-manifest 1\nrace publisher one\n";
@@ -716,11 +716,17 @@ out:
 	return ret;
 }
 
-static int validate_config(void)
+static int validate_config(int print_storage_id)
 {
 	struct s3_client client = S3_CLIENT_INIT;
+	struct strbuf storage_id = STRBUF_INIT;
 	int ret = s3_client_init_from_env(&client);
 
+	if (!ret && print_storage_id) {
+		s3_client_storage_id(&client, &storage_id);
+		printf("%s\n", storage_id.buf);
+	}
+	strbuf_release(&storage_id);
 	s3_client_release(&client);
 	return ret ? 1 : 0;
 }
@@ -730,8 +736,12 @@ int cmd_main(int argc, const char **argv)
 	trace2_cmd_name("cloud-bench");
 	if (argc == 3 && !strcmp(argv[1], "--race-publisher"))
 		return race_publisher_worker(argv[2]);
-	if (argc == 2 && !strcmp(argv[1], "validate-config"))
-		return validate_config();
+	if ((argc == 2 || argc == 3) &&
+	    !strcmp(argv[1], "validate-config")) {
+		if (argc == 3 && strcmp(argv[2], "--print-storage-id"))
+			usage(cloud_bench_usage);
+		return validate_config(argc == 3);
+	}
 	if (argc != 3 || strcmp(argv[1], "probe") || strcmp(argv[2], "--json"))
 		usage(cloud_bench_usage);
 	return run_probe();

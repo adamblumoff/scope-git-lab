@@ -28,7 +28,9 @@ git -C "$client" push --quiet "$bare" HEAD:main
 git -C "$bare" repack -ad
 
 fallback_oid=$(git -C "$client" rev-parse HEAD)
-printf 'git-cloud-odb 1\nlayout group\nprefix %s/group\n' "$prefix" \
+storage_id=$(git cloud-bench validate-config --print-storage-id)
+printf 'git-cloud-odb 2\nlayout group\nprefix %s/group\nstorage %s\n' \
+	"$prefix" "$storage_id" \
 	>"$bare/objects/cloud-odb"
 
 git -C "$bare" commit-graph write
@@ -47,6 +49,7 @@ git -C "$bare" cat-file --batch-all-objects \
 grep "^$fallback_oid$" "$trash/fallback-enumerated" >/dev/null
 git -C "$bare" gc --auto
 git -C "$bare" gc
+git -C "$bare" repack -ad
 
 printf 'cloud\n' >>"$client/object"
 git -C "$client" commit --quiet -am cloud

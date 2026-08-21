@@ -17,7 +17,7 @@
 #include "strvec.h"
 #include "tmp-objdir.h"
 
-#define CLOUD_MARKER_HEADER "git-cloud-odb 1"
+#define CLOUD_MARKER_HEADER "git-cloud-odb 2"
 #define CLOUD_GROUP_HEADER_SIZE 32
 #define CLOUD_CAS_ATTEMPTS 64
 #define CLOUD_GROUP_TARGET (256 * 1024)
@@ -25,6 +25,8 @@
 #define CLOUD_MAX_TRANSACTION_BYTES (32 * 1024 * 1024)
 #define CLOUD_MAX_ARTIFACT_BYTES (64 * 1024 * 1024)
 #define CLOUD_MAX_TRANSACTION_OBJECTS 65536
+#define CLOUD_MAX_MANIFEST_ARTIFACTS 1024
+#define CLOUD_MAX_MANIFEST_INDEX_BYTES CLOUD_MAX_ARTIFACT_BYTES
 
 struct cloud_range {
 	struct odb_source_cloud *source;
@@ -115,12 +117,14 @@ static int valid_prefix(const char *prefix)
 	return 1;
 }
 
-static int read_marker(const char *objects_path, struct strbuf *prefix)
+static int read_marker(const char *objects_path, struct strbuf *prefix,
+		       const char *storage_id)
 {
 	struct strbuf path = STRBUF_INIT;
 	struct strbuf contents = STRBUF_INIT;
 	struct string_list lines = STRING_LIST_INIT_DUP;
-	const char *value;
+	const char *prefix_value;
+	const char *storage_value;
 	int ret = -1;
 
 	strbuf_addf(&path, "%s/cloud-odb", objects_path);
@@ -133,14 +137,16 @@ static int read_marker(const char *objects_path, struct strbuf *prefix)
 		free(lines.items[lines.nr - 1].string);
 		lines.nr--;
 	}
-	if (lines.nr != 3 || strcmp(lines.items[0].string, CLOUD_MARKER_HEADER) ||
+	if (lines.nr != 4 || strcmp(lines.items[0].string, CLOUD_MARKER_HEADER) ||
 	    strcmp(lines.items[1].string, "layout group") ||
-	    !skip_prefix(lines.items[2].string, "prefix ", &value) ||
-	    !valid_prefix(value)) {
+	    !skip_prefix(lines.items[2].string, "prefix ", &prefix_value) ||
+	    !valid_prefix(prefix_value) ||
+	    !skip_prefix(lines.items[3].string, "storage ", &storage_value) ||
+	    strcmp(storage_value, storage_id)) {
 		error(_("cloud ODB marker '%s' is invalid"), path.buf);
 		goto out;
 	}
-	strbuf_addstr(prefix, value);
+	strbuf_addstr(prefix, prefix_value);
 	ret = 0;
 out:
 	string_list_clear(&lines, 0);
@@ -329,6 +335,23 @@ static int cloud_artifact_equal(const struct odb_cloud_artifact *a,
 		!strcmp(a->index_key, b->index_key);
 }
 
+static int cloud_manifest_within_limits(const struct odb_cloud_manifest *manifest)
+{
+	uint64_t index_bytes = 0;
+
+	if (manifest->artifacts_nr > CLOUD_MAX_MANIFEST_ARTIFACTS)
+		return error(_("cloud manifest has too many artifacts"));
+	for (size_t i = 0; i < manifest->artifacts_nr; i++) {
+		uint64_t artifact_bytes = manifest->artifacts[i].index_bytes;
+
+		if (artifact_bytes > CLOUD_MAX_ARTIFACT_BYTES ||
+		    artifact_bytes > CLOUD_MAX_MANIFEST_INDEX_BYTES - index_bytes)
+			return error(_("cloud manifest indexes exceed the size limit"));
+		index_bytes += artifact_bytes;
+	}
+	return 0;
+}
+
 static int cloud_load(struct odb_source_cloud *source)
 {
 	struct odb_cloud_manifest manifest = ODB_CLOUD_MANIFEST_INIT;
@@ -338,6 +361,8 @@ static int cloud_load(struct odb_source_cloud *source)
 	int ret = -1;
 
 	if (cloud_get_manifest(source, &manifest, &etag))
+		goto out;
+	if (cloud_manifest_within_limits(&manifest))
 		goto out;
 	if (manifest.artifacts_nr < old_readers ||
 	    source->manifest.artifacts_nr < old_readers)
@@ -1140,6 +1165,7 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 {
 	struct odb_source_cloud *source;
 	struct strbuf segment_manifest = STRBUF_INIT;
+	struct strbuf storage_id = STRBUF_INIT;
 
 	strbuf_addf(&segment_manifest, "%s/segments/manifest", path);
 	if (file_exists(segment_manifest.buf))
@@ -1152,9 +1178,12 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->prefix = (struct strbuf)STRBUF_INIT;
 	source->manifest_key = (struct strbuf)STRBUF_INIT;
 	odb_source_init(&source->base, odb, ODB_SOURCE_CLOUD, path, local);
-	if (read_marker(path, &source->prefix) ||
-	    s3_client_init_from_env(&source->client))
+	if (s3_client_init_from_env(&source->client))
 		die(_("unable to configure cloud ODB at '%s'"), path);
+	s3_client_storage_id(&source->client, &storage_id);
+	if (read_marker(path, &source->prefix, storage_id.buf))
+		die(_("unable to configure cloud ODB at '%s'"), path);
+	strbuf_release(&storage_id);
 	strbuf_addf(&source->manifest_key, "%s/manifest", source->prefix.buf);
 	source->fallback = odb_source_files_new(odb, path, local);
 	source->base.free = cloud_free;
