@@ -12,22 +12,30 @@ from urllib.parse import unquote, urlsplit
 
 
 REPO_ROOT = os.environ["GIT_HTTP_ROOT"]
-REPO_NAME = os.environ["GIT_HTTP_REPO_NAME"]
-REPO_PREFIX = f"/{REPO_NAME}"
+REPO_NAMES = tuple(os.environ["GIT_HTTP_REPO_NAMES"].split(":"))
+REPO_PREFIXES = tuple(f"/{name}" for name in REPO_NAMES)
 MAX_REQUEST_BYTES = int(
     os.environ.get("CLOUD_BENCH_MAX_REQUEST_BYTES", str(1024 * 1024 * 1024))
 )
 MAX_BUFFERED_REQUEST_BYTES = int(
     os.environ.get("CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES", str(MAX_REQUEST_BYTES))
 )
+MAX_RECEIVE_RESPONSE_BYTES = int(
+    os.environ.get("CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES", str(16 * 1024 * 1024))
+)
 MAX_CONCURRENT_REQUESTS = int(
-    os.environ.get("CLOUD_BENCH_MAX_CONCURRENT_REQUESTS", "16")
+    os.environ.get("CLOUD_BENCH_MAX_CONCURRENT_REQUESTS", "64")
 )
 REQUEST_TIMEOUT_SECONDS = float(
     os.environ.get("CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS", "30")
 )
 
-if min(MAX_REQUEST_BYTES, MAX_BUFFERED_REQUEST_BYTES, MAX_CONCURRENT_REQUESTS) <= 0:
+if min(
+    MAX_REQUEST_BYTES,
+    MAX_BUFFERED_REQUEST_BYTES,
+    MAX_RECEIVE_RESPONSE_BYTES,
+    MAX_CONCURRENT_REQUESTS,
+) <= 0:
     raise ValueError("request limits must be positive")
 if REQUEST_TIMEOUT_SECONDS <= 0:
     raise ValueError("request timeout must be positive")
@@ -78,8 +86,12 @@ class GitHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._finish_request_input()
-        if urlsplit(self.path).path == "/healthz":
+        request_path = urlsplit(self.path).path
+        if request_path == "/healthz":
             self._send_health(include_body=True)
+            return
+        if request_path == "/results/latest.json":
+            self._send_latest_result()
             return
         self._serve_git()
 
@@ -95,11 +107,32 @@ class GitHandler(BaseHTTPRequestHandler):
         if include_body:
             self.wfile.write(body)
 
+    def _send_latest_result(self):
+        path = os.environ.get("CLOUD_BENCH_LATEST_RESULT", "/results/latest.json")
+        try:
+            with open(path, "rb") as result:
+                body = result.read(16 * 1024 * 1024 + 1)
+        except FileNotFoundError:
+            self.send_error(404)
+            return
+        if len(body) > 16 * 1024 * 1024:
+            self.send_error(413)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_git(self):
         target = urlsplit(self.path)
         path_info = unquote(target.path)
-        endpoint = path_info.removeprefix(REPO_PREFIX)
-        if not path_info.startswith(REPO_PREFIX) or endpoint not in (
+        repo_prefix = next(
+            (prefix for prefix in REPO_PREFIXES if path_info.startswith(prefix)),
+            None,
+        )
+        endpoint = path_info.removeprefix(repo_prefix) if repo_prefix else ""
+        if repo_prefix is None or endpoint not in (
             "/info/refs",
             "/git-upload-pack",
             "/git-receive-pack",
@@ -213,13 +246,38 @@ class GitHandler(BaseHTTPRequestHandler):
         }
         content_length = self.headers.get("Content-Length")
         content_type = self.headers.get("Content-Type")
+        content_encoding = self.headers.get("Content-Encoding")
         git_protocol = self.headers.get("Git-Protocol")
         if content_length is not None:
             env["CONTENT_LENGTH"] = content_length
         if content_type is not None:
             env["CONTENT_TYPE"] = content_type
+        if content_encoding is not None:
+            env["HTTP_CONTENT_ENCODING"] = content_encoding
         if git_protocol is not None:
             env["HTTP_GIT_PROTOCOL"] = git_protocol
+        failpoint = self.headers.get("X-Cloud-Odb-Failpoint")
+        allowed_failpoints = {
+            "before-artifact-build",
+            "before-artifact-upload",
+            "after-artifact-upload",
+            "before-cas",
+            "after-cas",
+        }
+        if failpoint in allowed_failpoints:
+            env["GIT_TEST_CLOUD_ODB_FAILPOINT"] = failpoint
+        for name in (
+            "AWS_ENDPOINT_URL",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_S3_BUCKET_NAME",
+            "AWS_DEFAULT_REGION",
+            "AWS_S3_URL_STYLE",
+            "GIT_CLOUD_ODB_METRICS_PATH",
+        ):
+            value = os.environ.get(name)
+            if value is not None:
+                env[name] = value
         return env
 
     def _forward_cgi_response(self, process):
@@ -250,18 +308,59 @@ class GitHandler(BaseHTTPRequestHandler):
             else:
                 headers.append((name, value.strip()))
 
-        self.send_response(status)
-        for name, value in headers:
-            if name.lower() not in ("connection", "status", "transfer-encoding"):
-                self.send_header(name, value)
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.close_connection = True
+        if urlsplit(self.path).path.endswith("/git-receive-pack"):
+            self._buffer_receive_response(process, status, headers)
+            return
+
+        self._send_cgi_headers(status, headers)
         shutil.copyfileobj(process.stdout, self.wfile, length=64 * 1024)
         process.stdout.close()
         return_code = process.wait()
         if return_code:
             self.log_error("git http-backend exited with status %d", return_code)
+
+    def _send_cgi_headers(self, status, headers, content_length=None):
+        self.send_response(status)
+        for name, value in headers:
+            if name.lower() not in (
+                "connection",
+                "content-length",
+                "status",
+                "transfer-encoding",
+            ):
+                self.send_header(name, value)
+        if content_length is not None:
+            self.send_header("Content-Length", str(content_length))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _buffer_receive_response(self, process, status, headers):
+        response_body = tempfile.TemporaryFile()
+        response_bytes = 0
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            response_bytes += len(chunk)
+            if response_bytes > MAX_RECEIVE_RESPONSE_BYTES:
+                process.terminate()
+                process.wait()
+                response_body.close()
+                self.send_error(502, "receive-pack response is too large")
+                return
+            response_body.write(chunk)
+        process.stdout.close()
+        return_code = process.wait()
+        if return_code:
+            self.log_error("git http-backend exited with status %d", return_code)
+            response_body.close()
+            self.send_error(500, "git receive-pack failed")
+            return
+        response_body.seek(0)
+        self._send_cgi_headers(status, headers, response_bytes)
+        shutil.copyfileobj(response_body, self.wfile, length=64 * 1024)
+        response_body.close()
 
 
 class GitHTTPServer(ThreadingHTTPServer):

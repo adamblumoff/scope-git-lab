@@ -26,7 +26,9 @@ PY
 )
 
 CLOUD_BENCH_REPO_ROOT=$trash/repos \
+CLOUD_BENCH_RESULTS_DIR=$trash/results \
 CLOUD_BENCH_ALLOW_PUSH=1 \
+CLOUD_BENCH_CLOUD_ODB=0 \
 PORT=$port \
 	"$script_dir/cloud-bench" serve >"$trash/server.log" 2>&1 &
 server_pid=$!
@@ -63,15 +65,30 @@ git -C "$trash/client" add smoke
 git -C "$trash/client" commit --quiet -m smoke
 git -C "$trash/client" push --quiet origin HEAD:main
 
-git clone --quiet "$url" "$trash/check"
+base=$(git -C "$trash/client" rev-parse HEAD) &&
+tree=$(git -C "$trash/client" rev-parse HEAD^{tree}) &&
+i=0 &&
+while test "$i" -lt 50
+do
+	commit=$(printf 'gzip request %s\n' "$i" |
+		git -C "$trash/client" commit-tree "$tree" -p "$base") &&
+	git -C "$trash/client" update-ref "refs/heads/gzip-$i" "$commit" &&
+	i=$((i + 1))
+done &&
+git -C "$trash/client" push --quiet --all origin
+
+GIT_TRACE_CURL=$trash/curl.trace git clone --quiet "$url" "$trash/check"
 test "$(cat "$trash/check/smoke")" = smoke
+grep 'Content-Encoding: gzip' "$trash/curl.trace" >/dev/null
 
 kill "$server_pid"
 wait "$server_pid" 2>/dev/null || :
 server_pid=
 
 CLOUD_BENCH_REPO_ROOT=$trash/repos \
-CLOUD_BENCH_ALLOW_PUSH=1 \
+CLOUD_BENCH_RESULTS_DIR=$trash/results \
+CLOUD_BENCH_ALLOW_PUSH=0 \
+CLOUD_BENCH_CLOUD_ODB=0 \
 CLOUD_BENCH_MAX_BUFFERED_REQUEST_BYTES=8 \
 CLOUD_BENCH_MAX_CONCURRENT_REQUESTS=2 \
 CLOUD_BENCH_REQUEST_TIMEOUT_SECONDS=1 \
@@ -90,6 +107,30 @@ do
 	fi
 	sleep 0.1
 done
+
+if python3 "$script_dir/matrix.py" \
+	--url "http://127.0.0.1:$port" \
+	--writers 1 \
+	--warmups 0 \
+	--samples 1 \
+	--payload-bytes 16 \
+	--skip-failpoints \
+	--output "$trash/rejected-matrix.json" >"$trash/rejected-matrix.stdout"
+then
+	echo >&2 "matrix accepted a run whose seed and writers were rejected"
+	exit 1
+fi
+python3 - "$trash/rejected-matrix.json" <<'PY'
+import json
+import sys
+
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+	result = json.load(stream)
+assert result["ok"] is False
+assert result["layouts"][0]["seed"]["success"] is False
+assert result["layouts"][0]["writerLevels"][0]["correctnessPassed"] is False
+PY
 
 python3 - "$port" <<'PY'
 import socket

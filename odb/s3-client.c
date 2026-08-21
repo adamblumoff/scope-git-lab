@@ -20,6 +20,70 @@ enum s3_request_method {
 	S3_REQUEST_DELETE,
 };
 
+static const char *method_name(enum s3_request_method method)
+{
+	switch (method) {
+	case S3_REQUEST_GET:
+		return "GET";
+	case S3_REQUEST_HEAD:
+		return "HEAD";
+	case S3_REQUEST_PUT:
+		return "PUT";
+	case S3_REQUEST_DELETE:
+		return "DELETE";
+	}
+	BUG("unknown S3 request method");
+}
+
+static uint64_t range_length(const char *range)
+{
+	uintmax_t first, last;
+	char *end;
+
+	if (!range)
+		return 0;
+	errno = 0;
+	first = strtoumax(range, &end, 10);
+	if (errno || end == range || *end++ != '-')
+		return 0;
+	last = strtoumax(end, &end, 10);
+	if (errno || *end || last < first)
+		return 0;
+	return last - first + 1;
+}
+
+static void append_request_metric(enum s3_request_method method,
+				  const char *range,
+				  const struct s3_response *response)
+{
+	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
+	struct strbuf line = STRBUF_INIT;
+	uint64_t requested = range_length(range);
+	int fd;
+
+	if (!path || !*path)
+		return;
+	strbuf_addf(&line,
+		    "{\"schema\":\"git-cloud-odb-call/v1\","
+		    "\"pid\":%"PRIuMAX",\"method\":\"%s\","
+		    "\"status\":%ld,\"requests\":1,\"gets\":%d,"
+		    "\"heads\":%d,\"puts\":%d,\"rangeRequests\":%d,"
+		    "\"rangeRequestedBytes\":%"PRIu64","
+		    "\"uploadedBytes\":%"PRIu64","
+		    "\"downloadedBytes\":%"PRIu64",\"conflicts\":%d}\n",
+		    (uintmax_t)getpid(), method_name(method), response->http_status,
+		    method == S3_REQUEST_GET, method == S3_REQUEST_HEAD,
+		    method == S3_REQUEST_PUT, !!range, requested,
+		    response->uploaded_bytes, response->downloaded_bytes,
+		    response->http_status == 409 || response->http_status == 412);
+	fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);
+	if (fd >= 0) {
+		write_in_full(fd, line.buf, line.len);
+		close(fd);
+	}
+	strbuf_release(&line);
+}
+
 struct s3_upload {
 	const unsigned char *data;
 	size_t len;
@@ -434,6 +498,8 @@ static int s3_request(struct s3_client *client, const char *key,
 			 method == S3_REQUEST_DELETE ? "DELETE" : NULL);
 	curl_easy_setopt(slot->curl, CURLOPT_FOLLOWLOCATION, 0L);
 	curl_easy_setopt(slot->curl, CURLOPT_FAILONERROR, 0L);
+	curl_easy_setopt(slot->curl, CURLOPT_CONNECTTIMEOUT, 10L);
+	curl_easy_setopt(slot->curl, CURLOPT_TIMEOUT, 60L);
 	curl_easy_setopt(slot->curl, CURLOPT_HEADERFUNCTION, response_header);
 	curl_easy_setopt(slot->curl, CURLOPT_HEADERDATA, response);
 	curl_easy_setopt(slot->curl, CURLOPT_WRITEFUNCTION, response_body);
@@ -482,6 +548,29 @@ static int s3_request(struct s3_client *client, const char *key,
 		      curl_easy_strerror(results.curl_result));
 		goto out;
 	}
+	client->metrics.requests++;
+	client->metrics.uploaded_bytes += response->uploaded_bytes;
+	client->metrics.downloaded_bytes += response->downloaded_bytes;
+	if (response->http_status == 409 || response->http_status == 412)
+		client->metrics.conflicts++;
+	switch (method) {
+	case S3_REQUEST_GET:
+		client->metrics.gets++;
+		if (range) {
+			client->metrics.range_requests++;
+		}
+		break;
+	case S3_REQUEST_HEAD:
+		client->metrics.heads++;
+		break;
+	case S3_REQUEST_PUT:
+		client->metrics.puts++;
+		break;
+	case S3_REQUEST_DELETE:
+		client->metrics.deletes++;
+		break;
+	}
+	append_request_metric(method, range, response);
 	ret = 0;
 out:
 	curl_slist_free_all(headers);
@@ -531,7 +620,36 @@ int s3_client_get_range(struct s3_client *client, const char *key,
 	strbuf_addf(&range, "%"PRIu64"-%"PRIu64, offset, last);
 	ret = s3_request(client, key, S3_REQUEST_GET, NULL, 0,
 			 NULL, 0, range.buf, response);
+	if (!ret)
+		client->metrics.range_requested_bytes += length;
 	strbuf_release(&range);
+	return ret;
+}
+
+int s3_client_read_range(struct s3_client *client, const char *key,
+			 uint64_t object_size, uint64_t offset,
+			 size_t length, void *buffer)
+{
+	struct s3_response response = S3_RESPONSE_INIT;
+	struct strbuf expected = STRBUF_INIT;
+	int ret = -1;
+
+	if (!length || offset > object_size || length > object_size - offset)
+		return error(_("S3 read is outside the object bounds"));
+	if (s3_client_get_range(client, key, offset, length, &response))
+		goto out;
+	strbuf_addf(&expected, "bytes %"PRIu64"-%"PRIu64"/%"PRIu64,
+		    offset, offset + length - 1, object_size);
+	if (response.http_status != 206 || response.body.len != length ||
+	    strbuf_cmp(&response.content_range, &expected)) {
+		error(_("S3 returned an invalid byte range"));
+		goto out;
+	}
+	memcpy(buffer, response.body.buf, length);
+	ret = 0;
+out:
+	strbuf_release(&expected);
+	s3_response_release(&response);
 	return ret;
 }
 

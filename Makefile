@@ -1236,6 +1236,7 @@ LIB_OBJS += odb/source-packed.o
 LIB_OBJS += odb/source-segment.o
 LIB_OBJS += odb/segment.o
 LIB_OBJS += odb/segment-group.o
+LIB_OBJS += odb/cloud-manifest.o
 LIB_OBJS += odb/streaming.o
 LIB_OBJS += odb/transaction.o
 LIB_OBJS += oid-array.o
@@ -1542,6 +1543,7 @@ THIRD_PARTY_SOURCES += $(UNIT_TEST_DIR)/clar/%
 THIRD_PARTY_SOURCES += $(UNIT_TEST_DIR)/clar/clar/%
 
 CLAR_TEST_SUITES += u-ctype
+CLAR_TEST_SUITES += u-cloud-manifest
 CLAR_TEST_SUITES += u-dir
 CLAR_TEST_SUITES += u-example-decorate
 CLAR_TEST_SUITES += u-hash
@@ -1861,7 +1863,10 @@ $(error USE_S3 requires libcurl 7.75.0 or later and curl-config)
         endif
 	BASIC_CFLAGS += -DUSE_S3
 	PROGRAM_OBJS += cloud-bench.o
-	CLOUD_BENCH_OBJS += odb/s3-client.o
+	LIB_OBJS += odb/source-cloud.o
+	LIB_OBJS += odb/s3-client.o
+	GITLIBS += http.o
+	EXTLIBS += $(CURL_LIBCURL)
 endif
 
 IMAP_SEND_LDFLAGS += $(OPENSSL_LINK) $(OPENSSL_LIBSSL) $(LIB_4_CRYPTO)
@@ -3030,7 +3035,7 @@ headless-git$X: headless-git.o git.res GIT-LDFLAGS
 git-%$X: %.o GIT-LDFLAGS $(GITLIBS)
 	$(QUIET_LINK)$(CC) $(ALL_CFLAGS) -o $@ $(ALL_LDFLAGS) $(filter %.o,$^) $(LIBS)
 
-git-cloud-bench$X: cloud-bench.o $(CLOUD_BENCH_OBJS) http.o GIT-LDFLAGS $(GITLIBS)
+git-cloud-bench$X: cloud-bench.o $(CLOUD_BENCH_OBJS) GIT-LDFLAGS $(GITLIBS)
 	$(QUIET_LINK)$(CC) $(ALL_CFLAGS) -o $@ $(ALL_LDFLAGS) $(filter %.o,$^) \
 		$(CURL_LIBCURL) $(LIBS)
 

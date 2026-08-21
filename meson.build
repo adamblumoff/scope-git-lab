@@ -439,6 +439,7 @@ libgit_sources = [
   'odb/source-segment.c',
   'odb/segment.c',
   'odb/segment-group.c',
+  'odb/cloud-manifest.c',
   'odb/streaming.c',
   'odb/transaction.c',
   'oid-array.c',

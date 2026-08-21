@@ -3,6 +3,19 @@
 
 #include "strbuf.h"
 
+struct s3_metrics {
+	uint64_t requests;
+	uint64_t gets;
+	uint64_t heads;
+	uint64_t puts;
+	uint64_t deletes;
+	uint64_t range_requests;
+	uint64_t range_requested_bytes;
+	uint64_t uploaded_bytes;
+	uint64_t downloaded_bytes;
+	uint64_t conflicts;
+};
+
 struct s3_client {
 	char *endpoint;
 	char *access_key;
@@ -11,6 +24,7 @@ struct s3_client {
 	char *region;
 	char *url_style;
 	char *sigv4;
+	struct s3_metrics metrics;
 	unsigned int initialized:1;
 };
 
@@ -50,6 +64,9 @@ int s3_client_get(struct s3_client *client, const char *key,
 int s3_client_get_range(struct s3_client *client, const char *key,
 			uint64_t offset, uint64_t length,
 			struct s3_response *response);
+int s3_client_read_range(struct s3_client *client, const char *key,
+			 uint64_t object_size, uint64_t offset,
+			 size_t length, void *buffer);
 int s3_client_delete(struct s3_client *client, const char *key,
 		     struct s3_response *response);
 

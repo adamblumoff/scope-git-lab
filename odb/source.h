@@ -26,6 +26,9 @@ enum odb_source_type {
 
 	/* Experimental immutable segment object store. */
 	ODB_SOURCE_SEGMENT,
+
+	/* Experimental object storage backed by immutable cloud artifacts. */
+	ODB_SOURCE_CLOUD,
 };
 
 struct object_id;

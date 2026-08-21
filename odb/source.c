@@ -2,6 +2,9 @@
 #include "dir.h"
 #include "object-file.h"
 #include "odb/source-files.h"
+#ifdef USE_S3
+#include "odb/source-cloud.h"
+#endif
 #include "odb/source-segment.h"
 #include "odb/source.h"
 #include "packfile.h"
@@ -14,11 +17,23 @@ struct odb_source *odb_source_new(struct object_database *odb,
 	struct strbuf marker = STRBUF_INIT;
 	struct odb_source *source;
 
+	strbuf_addf(&marker, "%s/cloud-odb", path);
+#ifdef USE_S3
+	if (file_exists(marker.buf)) {
+		source = &odb_source_cloud_new(odb, path, local)->base;
+		goto out;
+	}
+#else
+	if (file_exists(marker.buf))
+		die(_("repository requires a Git build with cloud ODB support"));
+#endif
+	strbuf_reset(&marker);
 	strbuf_addf(&marker, "%s/segments/manifest", path);
 	if (file_exists(marker.buf))
 		source = &odb_source_segment_new(odb, path, local)->base;
 	else
 		source = &odb_source_files_new(odb, path, local)->base;
+out:
 	strbuf_release(&marker);
 
 	return source;

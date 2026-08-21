@@ -2,6 +2,7 @@
 #define ODB_SEGMENT_GROUP_H
 
 #include "object.h"
+#include "odb/range.h"
 
 struct strbuf;
 
@@ -50,6 +51,9 @@ struct odb_segment_group {
 	uint64_t group_target;
 	unsigned char *cached_group;
 	size_t cached_group_nr;
+	odb_range_read_fn *range_read;
+	odb_range_release_fn *range_release;
+	void *range_data;
 };
 
 #define ODB_SEGMENT_GROUP_INIT { .cached_group_nr = SIZE_MAX }
@@ -64,6 +68,17 @@ struct odb_segment_group_stats {
 int odb_segment_group_open(struct odb_segment_group *segment,
 			   const char *data_path, const char *index_path,
 			   const struct git_hash_algo *hash_algo);
+int odb_segment_group_open_reader(struct odb_segment_group *segment,
+				  const char *data_label,
+				  uint64_t data_bytes,
+				  const void *data_header,
+				  size_t data_header_size,
+				  const void *index_data,
+				  size_t index_bytes,
+				  const struct git_hash_algo *hash_algo,
+				  odb_range_read_fn *range_read,
+				  odb_range_release_fn *range_release,
+				  void *range_data);
 void odb_segment_group_close(struct odb_segment_group *segment);
 
 /* Return 0 when found and 1 when absent. */
