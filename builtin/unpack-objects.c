@@ -603,7 +603,8 @@ static void unpack_all(void)
 		unpack_one(i);
 		display_progress(progress, i + 1);
 	}
-	odb_transaction_commit(transaction);
+	if (odb_transaction_commit(transaction))
+		die(_("failed to commit ODB transaction"));
 	stop_progress(&progress);
 
 	if (delta_list)

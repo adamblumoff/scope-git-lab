@@ -964,8 +964,12 @@ int index_fd(struct index_state *istate, struct object_id *oid,
 								  &stream,
 								  xsize_t(st->st_size),
 								  oid);
-			if (!inflight)
-				odb_transaction_commit(transaction);
+			if (!inflight) {
+				int commit_ret = odb_transaction_commit(transaction);
+
+				if (!ret)
+					ret = commit_ret;
+			}
 		} else {
 			ret = hash_blob_stream(&stream,
 					       the_repository->hash_algo, oid,

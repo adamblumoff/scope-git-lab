@@ -680,7 +680,8 @@ int cmd_add(int argc,
 
 	if (chmod_arg && pathspec.nr)
 		exit_status |= chmod_pathspec(repo, &pathspec, chmod_arg[0], show_only);
-	odb_transaction_commit(transaction);
+	if (odb_transaction_commit(transaction))
+		die(_("failed to commit ODB transaction"));
 
 finish:
 	if (write_locked_index(repo->index, &lock_file,

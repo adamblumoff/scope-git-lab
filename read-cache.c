@@ -4061,8 +4061,8 @@ int add_files_to_cache(struct repository *repo, const char *prefix,
 	if (!inflight)
 		odb_transaction_begin_or_die(repo->objects, &transaction, 0);
 	run_diff_files(&rev, DIFF_RACY_IS_MODIFIED);
-	if (!inflight)
-		odb_transaction_commit(transaction);
+	if (!inflight && odb_transaction_commit(transaction))
+		data.add_errors++;
 
 	release_revisions(&rev);
 	return !!data.add_errors;

@@ -30,6 +30,9 @@ FAILPOINTS = (
 DEFAULT_MAX_CONCURRENT_REQUESTS = 64
 DEFAULT_MAX_CLOUD_METADATA_BYTES = 512 * 1024 * 1024
 DEFAULT_CLOUD_METADATA_RESERVATION_BYTES = 256 * 1024 * 1024
+RECOVERY_COMPLETION_TIMEOUT_SECONDS = float(
+    os.environ.get("CLOUD_BENCH_RECOVERY_TIMEOUT_SECONDS", "420")
+) + 30
 
 
 def run(command, *, cwd=None, env=None, check=True, timeout=300):
@@ -117,6 +120,7 @@ class MetricsCursor:
     def __init__(self, path, run_id):
         self.path = pathlib.Path(path)
         self.run_id = run_id
+        self.recovery_dir = pathlib.Path(f"{self.path}.recovery")
 
     def mark(self):
         try:
@@ -139,13 +143,19 @@ class MetricsCursor:
                     records.append(record)
         return records
 
+    def is_truncated(self):
+        return pathlib.Path(f"{self.path}.truncated").is_file()
+
 
 class MetricsRun:
     def __init__(self, base_path, run_id):
         self.path = pathlib.Path(f"{base_path}.{run_id}")
+        self.recovery_dir = pathlib.Path(f"{self.path}.recovery")
         self.active = pathlib.Path(f"{base_path}.active") / run_id
         self.active.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path.unlink(missing_ok=True)
+        pathlib.Path(f"{self.path}.truncated").unlink(missing_ok=True)
+        shutil.rmtree(self.recovery_dir, ignore_errors=True)
         descriptor = os.open(
             self.active,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
@@ -157,10 +167,33 @@ class MetricsRun:
     def cleanup(self):
         self.active.unlink(missing_ok=True)
         self.path.unlink(missing_ok=True)
+        pathlib.Path(f"{self.path}.truncated").unlink(missing_ok=True)
+        shutil.rmtree(self.recovery_dir, ignore_errors=True)
 
 
 def metrics_header(run_id):
     return f"X-Cloud-Odb-Metrics-Run: {run_id}"
+
+
+def recovery_header(token):
+    return f"X-Cloud-Odb-Recovery-Token: {token}"
+
+
+def wait_for_recovery(recovery_dir, token):
+    marker = pathlib.Path(recovery_dir) / token
+    deadline = time.monotonic() + RECOVERY_COMPLETION_TIMEOUT_SECONDS
+    invalid = False
+    while time.monotonic() < deadline:
+        try:
+            result = marker.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            time.sleep(0.01)
+            continue
+        if result in ("ok", "failed"):
+            return result
+        invalid = True
+        time.sleep(0.01)
+    return "invalid" if invalid else "timeout"
 
 
 def redact_url_userinfo(value):
@@ -262,14 +295,26 @@ class Corpus:
         return commit
 
 
-def push_one(barrier, repo, url, commit, refname, run_id, failpoint=None):
+def push_one(
+    barrier,
+    repo,
+    url,
+    commit,
+    refname,
+    run_id,
+    failpoint=None,
+    recovery_dir=None,
+):
     barrier.wait()
+    recovery_token = uuid.uuid4().hex
     command = [
         "git",
         "-C",
         str(repo),
         "-c",
         f"http.extraHeader={metrics_header(run_id)}",
+        "-c",
+        f"http.extraHeader={recovery_header(recovery_token)}",
     ]
     if failpoint:
         command.extend(("-c", f"http.extraHeader=X-Cloud-Odb-Failpoint: {failpoint}"))
@@ -277,13 +322,24 @@ def push_one(barrier, repo, url, commit, refname, run_id, failpoint=None):
     started = time.perf_counter()
     try:
         result = run(command, check=False, timeout=600)
+        recovery = "not-requested"
+        if result.returncode == 0 and recovery_dir is not None:
+            recovery = wait_for_recovery(recovery_dir, recovery_token)
         serialized_stderr = redact_url_in_text(result.stderr, url)
+        stderr_class = classify(result.stderr)
+        if result.returncode == 0 and recovery not in ("ok", "not-requested"):
+            stderr_class = f"recovery-{recovery}"
+            serialized_stderr = "cloud ODB recovery did not complete successfully"
         return {
             "ref": refname,
             "latencyMs": round((time.perf_counter() - started) * 1000, 3),
             "exitCode": result.returncode,
-            "success": result.returncode == 0,
-            "stderrClass": classify(result.stderr),
+            "success": result.returncode == 0 and recovery in (
+                "ok",
+                "not-requested",
+            ),
+            "recovery": recovery,
+            "stderrClass": stderr_class,
             "stderr": serialized_stderr[-2000:],
         }
     except subprocess.TimeoutExpired:
@@ -292,6 +348,7 @@ def push_one(barrier, repo, url, commit, refname, run_id, failpoint=None):
             "latencyMs": round((time.perf_counter() - started) * 1000, 3),
             "exitCode": None,
             "success": False,
+            "recovery": "push-timeout",
             "stderrClass": "timeout",
             "stderr": "git push timed out after 600 seconds",
         }
@@ -418,7 +475,14 @@ def run_sample(corpus, cursor, url, run_id, sample_ordinal, writers, warmup):
     with concurrent.futures.ThreadPoolExecutor(max_workers=writers) as executor:
         futures = [
             executor.submit(
-                push_one, barrier, corpus.repo, url, commit, refname, run_id
+                push_one,
+                barrier,
+                corpus.repo,
+                url,
+                commit,
+                refname,
+                run_id,
+                recovery_dir=cursor.recovery_dir,
             )
             for commit, refname in jobs
         ]
@@ -456,7 +520,14 @@ def run_failpoints(corpus, cursor, url, run_id, ordinal_base):
         mark = cursor.mark()
         barrier = threading.Barrier(1)
         raw = push_one(
-            barrier, corpus.repo, url, commit, refname, run_id, failpoint
+            barrier,
+            corpus.repo,
+            url,
+            commit,
+            refname,
+            run_id,
+            failpoint,
+            cursor.recovery_dir,
         )
         metrics = cursor.read(mark)
         ref_status, refs, ref_error = visible_refs(url, run_id)
@@ -608,6 +679,7 @@ def main():
                 corpus.root_commit,
                 seed_ref,
                 run_id,
+                recovery_dir=cursor.recovery_dir,
             )
             seed["storage"] = summarize_metrics(cursor.read(seed_mark))
             cloud_evidence = (
@@ -709,7 +781,8 @@ def main():
             overall_ok = overall_ok and layout_result["restartVerification"]["clone"]
             overall_ok = overall_ok and layout_result["restartVerification"]["fsck"]
             result["layouts"].append(layout_result)
-        result["ok"] = overall_ok
+        result["metricsTruncated"] = cursor.is_truncated()
+        result["ok"] = overall_ok and not result["metricsTruncated"]
         encoded = json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
         atomic_write_result(args.output, encoded)
         metrics_run.cleanup()

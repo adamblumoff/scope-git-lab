@@ -57,6 +57,29 @@ grep "cloud ODB marker .* exceeds the size limit" \
 	"$trash/marker-large.err" >/dev/null
 mv "$trash/cloud-odb.marker" "$bare/objects/cloud-odb"
 
+cp "$bare/objects/cloud-odb" "$client/.git/objects/cloud-odb"
+git -C "$client" ls-files --stage >"$trash/index-before-failed-commit"
+printf 'must not reach the index\n' >"$client/rejected-index-entry"
+rejected_oid=$(git -C "$client" hash-object rejected-index-entry)
+set +e
+GIT_TEST_CLOUD_ODB_FAILPOINT=commit-error \
+	git -C "$client" add rejected-index-entry \
+	>"$trash/add-failed-commit.out" 2>"$trash/add-failed-commit.err"
+add_status=$?
+set -e
+test "$add_status" -ne 0
+grep "failed to commit ODB transaction" \
+	"$trash/add-failed-commit.err" >/dev/null
+git -C "$client" ls-files --stage >"$trash/index-after-failed-commit"
+cmp "$trash/index-before-failed-commit" "$trash/index-after-failed-commit"
+rm "$client/.git/objects/cloud-odb"
+set +e
+git -C "$client" cat-file -e "$rejected_oid" \
+	>"$trash/rejected-object.out" 2>"$trash/rejected-object.err"
+rejected_status=$?
+set -e
+test "$rejected_status" -ne 0
+
 sleep 1
 test "$(printf '%s' "$freshen_contents" |
 	git -C "$bare" hash-object -w --stdin)" = "$freshen_oid"

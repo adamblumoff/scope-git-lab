@@ -230,13 +230,20 @@ class GitHandler(BaseHTTPRequestHandler):
                 self._finish_request_input()
 
             env = self._cgi_environment(path_info, target.query, request_length)
+            recovery_token = self.headers.get("X-Cloud-Odb-Recovery-Token")
+            if (
+                "GIT_CLOUD_ODB_METRICS_RUN" not in env
+                or recovery_token is None
+                or re.fullmatch(r"[0-9a-f]{32}", recovery_token) is None
+            ):
+                recovery_token = None
             process = subprocess.Popen(
                 ["git", "http-backend"],
                 stdin=request_body if request_body is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 env=env,
             )
-            self._forward_cgi_response(process, repo_prefix)
+            self._forward_cgi_response(process, repo_prefix, env, recovery_token)
         except (BrokenPipeError, ConnectionResetError):
             if process is not None:
                 process.terminate()
@@ -465,7 +472,9 @@ class GitHandler(BaseHTTPRequestHandler):
                     )
         return env
 
-    def _forward_cgi_response(self, process, repo_prefix):
+    def _forward_cgi_response(
+        self, process, repo_prefix, recovery_env, recovery_token
+    ):
         status = 200
         headers = []
         header_bytes = 0
@@ -494,7 +503,14 @@ class GitHandler(BaseHTTPRequestHandler):
                 headers.append((name, value.strip()))
 
         if urlsplit(self.path).path.endswith("/git-receive-pack"):
-            self._buffer_receive_response(process, status, headers, repo_prefix)
+            self._buffer_receive_response(
+                process,
+                status,
+                headers,
+                repo_prefix,
+                recovery_env,
+                recovery_token,
+            )
             return
 
         self._send_cgi_headers(status, headers)
@@ -520,34 +536,72 @@ class GitHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-    def _recover_cloud_odb(self, repo_prefix):
+    def _recover_cloud_odb(self, repo_prefix, recovery_env):
         repo_path = pathlib.Path(REPO_ROOT, repo_prefix.removeprefix("/"))
         marker = repo_path / "objects" / "cloud-odb"
         try:
             marker_stat = marker.stat(follow_symlinks=False)
         except FileNotFoundError:
-            return
+            return True
         if not stat.S_ISREG(marker_stat.st_mode):
             self.log_error("cloud ODB marker is not a regular file")
-            return
+            return False
         try:
             result = subprocess.run(
                 ["git", "-C", str(repo_path), "cloud-bench", "recover"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=recovery_env,
                 timeout=RECOVERY_TIMEOUT_SECONDS,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             self.log_error("cloud ODB recovery failed to run: %s", error)
-            return
+            return False
         if result.returncode:
             self.log_error(
                 "cloud ODB recovery exited with status %d", result.returncode
             )
+            return False
+        return True
 
-    def _buffer_receive_response(self, process, status, headers, repo_prefix):
+    def _record_recovery_completion(self, recovery_env, recovery_token, success):
+        if recovery_token is None:
+            return
+        metrics_path = recovery_env.get("GIT_CLOUD_ODB_METRICS_PATH")
+        if metrics_path is None:
+            return
+        directory = pathlib.Path(f"{metrics_path}.recovery")
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        marker = directory / recovery_token
+        try:
+            descriptor = os.open(
+                marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(b"ok\n" if success else b"failed\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as error:
+            self.log_error("unable to record cloud ODB recovery completion: %s", error)
+
+    def _finish_cloud_recovery(self, repo_prefix, recovery_env, recovery_token):
+        success = self._recover_cloud_odb(repo_prefix, recovery_env)
+        self._record_recovery_completion(recovery_env, recovery_token, success)
+
+    def _buffer_receive_response(
+        self,
+        process,
+        status,
+        headers,
+        repo_prefix,
+        recovery_env,
+        recovery_token,
+    ):
         response_body = tempfile.TemporaryFile()
         response_bytes = 0
         while True:
@@ -569,7 +623,12 @@ class GitHandler(BaseHTTPRequestHandler):
                         "git http-backend exited with status %d", return_code
                     )
                 else:
-                    self._recover_cloud_odb(repo_prefix)
+                    try:
+                        self.wfile.flush()
+                    finally:
+                        self._finish_cloud_recovery(
+                            repo_prefix, recovery_env, recovery_token
+                        )
                 return
             response_body.write(chunk)
         process.stdout.close()
@@ -579,11 +638,16 @@ class GitHandler(BaseHTTPRequestHandler):
             response_body.close()
             self.send_error(500, "git receive-pack failed")
             return
-        self._recover_cloud_odb(repo_prefix)
         response_body.seek(0)
-        self._send_cgi_headers(status, headers, response_bytes)
-        shutil.copyfileobj(response_body, self.wfile, length=64 * 1024)
-        response_body.close()
+        try:
+            self._send_cgi_headers(status, headers, response_bytes)
+            shutil.copyfileobj(response_body, self.wfile, length=64 * 1024)
+            self.wfile.flush()
+        finally:
+            response_body.close()
+            self._finish_cloud_recovery(
+                repo_prefix, recovery_env, recovery_token
+            )
 
 
 class GitHTTPServer(ThreadingHTTPServer):
@@ -635,5 +699,10 @@ class GitHTTPServer(ThreadingHTTPServer):
             self._body_bytes -= count
 
 
-port = int(os.environ.get("PORT", "8080"))
-GitHTTPServer(("0.0.0.0", port), GitHandler).serve_forever()
+def main():
+    port = int(os.environ.get("PORT", "8080"))
+    GitHTTPServer(("0.0.0.0", port), GitHandler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -615,6 +615,10 @@ with tempfile.TemporaryDirectory() as directory:
 	)
 	cursor = matrix.MetricsCursor(metrics, run_one)
 	assert matrix.summarize_metrics(cursor.read(0))["puts"] == 1
+	assert cursor.is_truncated() is False
+	pathlib.Path(f"{metrics}.truncated").touch()
+	assert cursor.is_truncated() is True
+	pathlib.Path(f"{metrics}.truncated").unlink()
 	assert matrix.redact_url_userinfo("https://user:token@example.com/root?x=1") == \
 		"https://example.com/root?x=1"
 
@@ -622,9 +626,15 @@ with tempfile.TemporaryDirectory() as directory:
 	assert metrics_run.path == pathlib.Path(f"{metrics}.{run_one}")
 	assert metrics_run.active.is_file()
 	metrics_run.path.write_text("metric\n")
+	pathlib.Path(f"{metrics_run.path}.truncated").touch()
+	metrics_run.recovery_dir.mkdir()
+	(metrics_run.recovery_dir / ("a" * 32)).write_text("ok\n")
+	assert matrix.wait_for_recovery(metrics_run.recovery_dir, "a" * 32) == "ok"
 	metrics_run.cleanup()
 	assert not metrics_run.active.exists()
 	assert not metrics_run.path.exists()
+	assert not pathlib.Path(f"{metrics_run.path}.truncated").exists()
+	assert not metrics_run.recovery_dir.exists()
 
 with tempfile.TemporaryDirectory() as directory:
 	first = matrix.Corpus(directory, "1" * 32, 16)
@@ -642,6 +652,8 @@ class Corpus:
 
 
 class Cursor:
+	recovery_dir = pathlib.Path("unused-recovery")
+
 	def mark(self):
 		return 0
 
@@ -657,6 +669,83 @@ matrix.visible_refs = lambda *args: (None, {}, "timeout")
 failpoints = matrix.run_failpoints(Corpus(), Cursor(), "url", "run", 0)
 assert all(not item["passed"] for item in failpoints)
 assert all(item["refInspectionExitCode"] is None for item in failpoints)
+PY
+
+python3 - "$script_dir/http-server.py" "$trash/http-server-unit" <<'PY'
+import importlib.util
+import io
+import os
+import pathlib
+import subprocess
+import sys
+import types
+
+
+root = pathlib.Path(sys.argv[2])
+repo = root / "bench.git"
+(repo / "objects").mkdir(parents=True)
+(repo / "objects" / "cloud-odb").write_text("marker\n")
+os.environ["GIT_HTTP_ROOT"] = str(root)
+os.environ["GIT_HTTP_REPO_NAMES"] = "bench.git"
+
+spec = importlib.util.spec_from_file_location("cloud_http_server", sys.argv[1])
+server = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server)
+handler = object.__new__(server.GitHandler)
+handler.log_error = lambda *args: None
+recovery_env = {
+	"PATH": os.environ.get("PATH", ""),
+	"GIT_CLOUD_ODB_METRICS_RUN": "1" * 32,
+	"GIT_CLOUD_ODB_METRICS_PATH": str(root / ("process.ndjson." + "1" * 32)),
+}
+captured = {}
+original_run = server.subprocess.run
+
+
+def fake_run(command, **kwargs):
+	captured["command"] = command
+	captured.update(kwargs)
+	return subprocess.CompletedProcess(command, 0)
+
+
+server.subprocess.run = fake_run
+handler._recover_cloud_odb("/bench.git", recovery_env)
+server.subprocess.run = original_run
+assert captured["env"] is recovery_env
+assert captured["command"][-2:] == ["cloud-bench", "recover"]
+completion_token = "2" * 32
+handler._record_recovery_completion(recovery_env, completion_token, True)
+assert pathlib.Path(
+	f"{recovery_env['GIT_CLOUD_ODB_METRICS_PATH']}.recovery", completion_token
+).read_text() == "ok\n"
+
+events = []
+
+
+class Sink:
+	def write(self, data):
+		events.append(("body", bytes(data)))
+		return len(data)
+
+	def flush(self):
+		events.append(("flush",))
+
+
+handler.wfile = Sink()
+handler._send_cgi_headers = lambda *args: events.append(("headers",))
+handler._finish_cloud_recovery = lambda prefix, env, token: events.append(
+	("recover", prefix, env["GIT_CLOUD_ODB_METRICS_RUN"], token)
+)
+process = types.SimpleNamespace(stdout=io.BytesIO(b"receive-ok"), wait=lambda: 0)
+handler._buffer_receive_response(
+	process, 200, [], "/bench.git", recovery_env, completion_token
+)
+assert events == [
+	("headers",),
+	("body", b"receive-ok"),
+	("flush",),
+	("recover", "/bench.git", "1" * 32, completion_token),
+]
 PY
 
 kill "$server_pid"
@@ -696,6 +785,7 @@ CLOUD_BENCH_RESULTS_DIR=$trash/custom-results \
 CLOUD_BENCH_REPO_NAME=custom.git \
 CLOUD_BENCH_ALLOW_PUSH=1 \
 CLOUD_BENCH_CLOUD_ODB=0 \
+GIT_CLOUD_ODB_METRICS_PATH=$trash/custom-metrics.ndjson \
 PORT=$port \
 	"$script_dir/cloud-bench" serve >"$trash/custom-server.log" 2>&1 &
 server_pid=$!

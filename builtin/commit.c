@@ -455,8 +455,9 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		char *ps_matched = xcalloc(pathspec.nr, 1);
 		repo_hold_locked_index(the_repository, &index_lock,
 				       LOCK_DIE_ON_ERROR);
-		add_files_to_cache(the_repository, also ? prefix : NULL,
-				   &pathspec, ps_matched, 0, 0, 0 );
+		if (add_files_to_cache(the_repository, also ? prefix : NULL,
+				       &pathspec, ps_matched, 0, 0, 0))
+			die(_("updating files failed"));
 		if (!all && report_path_error(ps_matched, &pathspec))
 			exit(128);
 

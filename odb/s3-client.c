@@ -18,7 +18,7 @@
 #error "USE_S3 requires libcurl 7.75.0 or later"
 #endif
 
-#define S3_METRICS_MAX_FILE_BYTES (16 * 1024 * 1024)
+#define S3_METRICS_MAX_DATA_BYTES (15 * 1024 * 1024)
 #define S3_MAX_WRITE_RESPONSE_BYTES (64 * 1024)
 
 enum s3_request_method {
@@ -80,8 +80,10 @@ static const char *metrics_run_id(void)
 void s3_metrics_append(const struct strbuf *line)
 {
 	const char *path = getenv("GIT_CLOUD_ODB_METRICS_PATH");
+	struct strbuf truncated_path = STRBUF_INIT;
 	struct stat st;
 	int fd;
+	int truncated = 0;
 
 	if (!path || !*path)
 		return;
@@ -89,10 +91,24 @@ void s3_metrics_append(const struct strbuf *line)
 	if (fd < 0)
 		return;
 	if (!fstat(fd, &st) && st.st_size >= 0 &&
-	    (uintmax_t)st.st_size <= S3_METRICS_MAX_FILE_BYTES &&
-	    line->len <= S3_METRICS_MAX_FILE_BYTES - (size_t)st.st_size)
-		write_in_full(fd, line->buf, line->len);
+	    (uintmax_t)st.st_size <= S3_METRICS_MAX_DATA_BYTES &&
+	    line->len <= S3_METRICS_MAX_DATA_BYTES - (size_t)st.st_size) {
+		if (write_in_full(fd, line->buf, line->len) < 0 ||
+		    fstat(fd, &st) || st.st_size < 0 ||
+		    (uintmax_t)st.st_size > S3_METRICS_MAX_DATA_BYTES)
+			truncated = 1;
+	} else {
+		truncated = 1;
+	}
 	close(fd);
+	if (!truncated)
+		return;
+
+	strbuf_addf(&truncated_path, "%s.truncated", path);
+	fd = open(truncated_path.buf, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd >= 0)
+		close(fd);
+	strbuf_release(&truncated_path);
 }
 
 static void append_request_metric(enum s3_request_method method,

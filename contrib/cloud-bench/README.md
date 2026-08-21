@@ -33,6 +33,8 @@ artifact cap keeps the two synchronous metadata reads per artifact within the
 keep publication metadata and read streams bounded until the group codec gains
 incremental object compression and inflation. Bounded direct writes use the
 same publication path so objects created by receive hooks remain available.
+Transaction failures propagate through direct, working-tree, index, and unpack
+callers before they can publish dependent state.
 Before uploading, each writer records transaction-unique immutable keys in a
 conditional manifest update. Publication keeps the journal record in a
 `published` state until a current ref or reflog proves that its ref transaction
@@ -49,8 +51,12 @@ takeover is safe because a transaction key is never reused: a delayed prior
 owner can only delete that abandoned transaction, not a later publication of
 the same content. Active records and GC leases receive a one-hour safety window;
 `git cloud-bench recover` performs an explicit recovery pass after repository
-setup. The service runs it after each successful receive; operators may run it
-after a failed receive once the safety window has elapsed. Cleanup checkpoints
+setup. The service sends and flushes the committed receive response, then runs
+recovery with the request's validated metrics identity so its storage calls
+remain part of the measured operation. Matrix pushes carry a run-scoped recovery
+token and wait for its local completion marker before reading metrics, so the
+flushed response cannot race result collection. Operators may run recovery after
+a failed receive once the safety window has elapsed. Cleanup checkpoints
 one orphan per manifest CAS and uses a separate 420-second helper timeout,
 configurable with `CLOUD_BENCH_RECOVERY_TIMEOUT_SECONDS`.
 Local staging cleanup is only a disk-space optimization. Files-backed
@@ -75,6 +81,11 @@ Larger successful responses switch to streaming rather than reporting a failed
 push after refs have committed. Override the spool threshold with
 `CLOUD_BENCH_MAX_RECEIVE_RESPONSE_BYTES`. Admission fails with HTTP 503 when a
 server-wide limit is full.
+
+Per-run storage metrics retain at most 15 MiB of event data. Crossing that bound
+creates a run-specific truncation marker, and the matrix reports
+`metricsTruncated: true` and fails instead of publishing incomplete totals as a
+successful measurement.
 
 `/results/latest.json` accepts results up to 64 MiB by default; override the
 bound with `CLOUD_BENCH_MAX_RESULT_BYTES`. Remote failure injection is disabled

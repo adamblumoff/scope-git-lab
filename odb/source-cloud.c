@@ -886,11 +886,16 @@ static int collect_oid(const struct object_id *oid,
 	return 0;
 }
 
-static void cloud_failpoint(const char *name)
+static int cloud_failpoint_enabled(const char *name)
 {
 	const char *value = getenv("GIT_TEST_CLOUD_ODB_FAILPOINT");
 
-	if (value && !strcmp(value, name))
+	return value && !strcmp(value, name);
+}
+
+static void cloud_failpoint(const char *name)
+{
+	if (cloud_failpoint_enabled(name))
 		_exit(99);
 }
 
@@ -1541,6 +1546,11 @@ static int cloud_transaction_commit(struct odb_transaction *base)
 	time_t created_at;
 	uint64_t data_bytes = 0, index_bytes = 0;
 	int ret = -1;
+
+	if (cloud_failpoint_enabled("commit-error")) {
+		error(_("test cloud ODB transaction commit failure"));
+		goto out;
+	}
 
 	if (incoming->type != ODB_SOURCE_FILES)
 		BUG("cloud transaction primary source is not files");
