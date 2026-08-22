@@ -1,14 +1,22 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "git-compat-util.h"
 #include "gettext.h"
 #include "json-writer.h"
+#include "odb.h"
+#include "odb/source-cloud.h"
 #include "odb/s3-client.h"
+#include "repository.h"
 #include "run-command.h"
+#include "setup.h"
 #include "strbuf.h"
 #include "trace2.h"
 #include "wrapper.h"
 
 static const char cloud_bench_usage[] =
-	"git-cloud-bench probe --json";
+	"git-cloud-bench probe --json\n"
+	"git-cloud-bench recover\n"
+	"git-cloud-bench validate-config [--print-storage-id]";
 
 static const char race_manifest_one[] =
 	"git-cloud-probe-manifest 1\nrace publisher one\n";
@@ -503,7 +511,8 @@ static int run_probe(void)
 	}
 	strbuf_addbuf(&immutable_etag, &response.etag);
 
-	if (s3_client_get(&client, immutable_key.buf, &response)) {
+	if (s3_client_get_limited(&client, immutable_key.buf,
+				  sizeof(immutable_data) - 1, &response)) {
 		result.failure_phase = "fullGet";
 		goto out;
 	}
@@ -602,7 +611,8 @@ static int run_probe(void)
 		goto out;
 	}
 
-	if (s3_client_get(&client, manifest_key.buf, &response)) {
+	if (s3_client_get_limited(&client, manifest_key.buf,
+				  sizeof(manifest_v2) - 1, &response)) {
 		result.failure_phase = "manifestFinalGet";
 		goto out;
 	}
@@ -626,7 +636,8 @@ static int run_probe(void)
 		result.failure_phase = "restartInit";
 		goto out;
 	}
-	if (s3_client_get(&client, manifest_key.buf, &response)) {
+	if (s3_client_get_limited(&client, manifest_key.buf,
+				  sizeof(manifest_v2) - 1, &response)) {
 		result.failure_phase = "restartVisibility";
 		goto out;
 	}
@@ -673,7 +684,8 @@ static int run_probe(void)
 		result.failure_phase = "raceFinalInit";
 		goto out;
 	}
-	if (s3_client_get(&client, manifest_key.buf, &response)) {
+	if (s3_client_get_limited(&client, manifest_key.buf,
+				  winning_manifest_len, &response)) {
 		result.failure_phase = "raceFinalGet";
 		goto out;
 	}
@@ -715,11 +727,46 @@ out:
 	return ret;
 }
 
+static int validate_config(int print_storage_id)
+{
+	struct s3_client client = S3_CLIENT_INIT;
+	struct strbuf storage_id = STRBUF_INIT;
+	int ret = s3_client_init_from_env(&client);
+
+	if (!ret && print_storage_id) {
+		s3_client_storage_id(&client, &storage_id);
+		printf("%s\n", storage_id.buf);
+	}
+	strbuf_release(&storage_id);
+	s3_client_release(&client);
+	return ret ? 1 : 0;
+}
+
+static int recover_cloud_odb(void)
+{
+	struct odb_source *source;
+
+	setup_git_directory(the_repository);
+	source = the_repository->objects->sources;
+	if (source->type != ODB_SOURCE_CLOUD)
+		return error(_("repository does not use a cloud ODB"));
+	return odb_source_cloud_recover(
+		container_of(source, struct odb_source_cloud, base));
+}
+
 int cmd_main(int argc, const char **argv)
 {
 	trace2_cmd_name("cloud-bench");
 	if (argc == 3 && !strcmp(argv[1], "--race-publisher"))
 		return race_publisher_worker(argv[2]);
+	if ((argc == 2 || argc == 3) &&
+	    !strcmp(argv[1], "validate-config")) {
+		if (argc == 3 && strcmp(argv[2], "--print-storage-id"))
+			usage(cloud_bench_usage);
+		return validate_config(argc == 3);
+	}
+	if (argc == 2 && !strcmp(argv[1], "recover"))
+		return recover_cloud_odb();
 	if (argc != 3 || strcmp(argv[1], "probe") || strcmp(argv[2], "--json"))
 		usage(cloud_bench_usage);
 	return run_probe();

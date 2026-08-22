@@ -1156,7 +1156,8 @@ int cmd_update_index(int argc,
 			 * a transaction.
 			 */
 			if (transaction && verbose) {
-				odb_transaction_commit(transaction);
+				if (odb_transaction_commit(transaction))
+					die(_("failed to commit ODB transaction"));
 				transaction = NULL;
 			}
 
@@ -1224,7 +1225,8 @@ int cmd_update_index(int argc,
 	/*
 	 * By now we have added all of the new objects
 	 */
-	odb_transaction_commit(transaction);
+	if (odb_transaction_commit(transaction))
+		die(_("failed to commit ODB transaction"));
 
 	if (split_index > 0) {
 		if (repo_config_get_split_index(the_repository) == 0)

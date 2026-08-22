@@ -2,6 +2,13 @@
 
 set -eu
 
+if test "${1:-}" = matrix
+then
+	shift
+	script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+	exec python3 "$script_dir/matrix.py" "$@"
+fi
+
 if test "${1:-}" = serve
 then
 	shift
@@ -11,6 +18,7 @@ then
 	}
 
 	repo_root=${CLOUD_BENCH_REPO_ROOT:-/app/repos}
+	results_dir=${CLOUD_BENCH_RESULTS_DIR:-/results}
 	repo_name=${CLOUD_BENCH_REPO_NAME:-bench.git}
 	case "$repo_root" in
 	/*) ;;
@@ -25,10 +33,125 @@ then
 		exit 2
 		;;
 	esac
+	case "$results_dir" in
+	/*) ;;
+	*)
+		echo >&2 "CLOUD_BENCH_RESULTS_DIR must be an absolute path"
+		exit 2
+		;;
+	esac
 
 	mkdir -p "$repo_root"
 	repo_root=$(CDPATH= cd -- "$repo_root" && pwd -P)
+	case "${CLOUD_BENCH_ALLOW_PUSH:-0}" in
+	1|true|yes) allow_push=true ;;
+	0|false|no) allow_push=false ;;
+	*)
+		echo >&2 "CLOUD_BENCH_ALLOW_PUSH must be true or false"
+		exit 2
+		;;
+	esac
+
+	run_prefix=${CLOUD_BENCH_RUN_PREFIX:-matrix/live}
+	case "$run_prefix" in
+	""|/*|*..*|*[!A-Za-z0-9_./-]*)
+		echo >&2 "CLOUD_BENCH_RUN_PREFIX contains unsupported characters"
+		exit 2
+		;;
+	esac
+	case "/$run_prefix/" in
+	*"/./"*|*"//"*)
+		echo >&2 "CLOUD_BENCH_RUN_PREFIX contains unsupported path components"
+		exit 2
+		;;
+	esac
+
+	if test -n "${AWS_ENDPOINT_URL:-}" ||
+		test -n "${AWS_ACCESS_KEY_ID:-}" ||
+		test -n "${AWS_SECRET_ACCESS_KEY:-}" ||
+		test -n "${AWS_S3_BUCKET_NAME:-}" ||
+		test -n "${AWS_DEFAULT_REGION:-}" ||
+		test -n "${AWS_S3_URL_STYLE:-}"
+	then
+		s3_any=true
+	else
+		s3_any=false
+	fi
+	if test -n "${AWS_ENDPOINT_URL:-}" &&
+		test -n "${AWS_ACCESS_KEY_ID:-}" &&
+		test -n "${AWS_SECRET_ACCESS_KEY:-}" &&
+		test -n "${AWS_S3_BUCKET_NAME:-}" &&
+		test -n "${AWS_DEFAULT_REGION:-}" &&
+		test -n "${AWS_S3_URL_STYLE:-}"
+	then
+		s3_complete=true
+	else
+		s3_complete=false
+	fi
+
+	case "${CLOUD_BENCH_CLOUD_ODB:-auto}" in
+	1|true|yes)
+		cloud_odb=true
+		test "$s3_complete" = true || {
+			echo >&2 "cloud ODB requires the complete AWS S3 environment"
+			exit 2
+		}
+		;;
+	0|false|no) cloud_odb=false ;;
+	auto)
+		if test "$s3_complete" = true
+		then
+			cloud_odb=true
+		elif test "$s3_any" = true
+		then
+			echo >&2 "partial AWS S3 environment cannot enable cloud ODB"
+			exit 2
+		else
+			cloud_odb=false
+		fi
+		;;
+	*)
+		echo >&2 "CLOUD_BENCH_CLOUD_ODB must be true, false, or auto"
+		exit 2
+		;;
+	esac
+	if test "$cloud_odb" = true
+	then
+		storage_id=$(git cloud-bench validate-config --print-storage-id)
+	fi
+
+	repo_names=$repo_name
 	repo_path=$repo_root/$repo_name
+	marker_path=$repo_path/objects/cloud-odb
+	segment_manifest_path=$repo_path/objects/segments/manifest
+	if test "$cloud_odb" = true
+	then
+		if test -e "$segment_manifest_path" || test -L "$segment_manifest_path"
+		then
+			echo >&2 "refusing to hide an existing segment store with cloud ODB"
+			exit 1
+		fi
+		expected_marker=$(printf 'git-cloud-odb 2\nlayout group\nprefix %s/group\nstorage %s\n' \
+			"$run_prefix" "$storage_id")
+		expected_marker_oid=$(printf '%s\n' "$expected_marker" |
+			git hash-object --stdin)
+		if test -L "$marker_path" ||
+			{ test -e "$marker_path" && test ! -f "$marker_path"; }
+		then
+			echo >&2 "cloud ODB marker must be a regular file"
+			exit 1
+		fi
+		if test -e "$marker_path" &&
+			test "$(git hash-object "$marker_path")" != "$expected_marker_oid"
+		then
+			echo >&2 "existing cloud ODB marker does not match cloud configuration"
+			exit 1
+		fi
+	elif test -e "$marker_path" || test -L "$marker_path"
+	then
+		echo >&2 "refusing to disable an existing cloud ODB marker"
+		exit 1
+	fi
 	if test ! -e "$repo_path"
 	then
 		git init --bare --initial-branch=main "$repo_path" >/dev/null
@@ -38,20 +161,22 @@ then
 		echo >&2 "repository path is not a bare Git repository: $repo_path"
 		exit 1
 	fi
-
-	case "${CLOUD_BENCH_ALLOW_PUSH:-0}" in
-	1|true|yes) allow_push=true ;;
-	0|false|no) allow_push=false ;;
-	*)
-		echo >&2 "CLOUD_BENCH_ALLOW_PUSH must be true or false"
-		exit 2
-		;;
-	esac
 	git -C "$repo_path" config http.receivepack "$allow_push"
+	if test "$cloud_odb" = true
+	then
+		if test ! -e "$marker_path"
+		then
+			printf '%s\n' "$expected_marker" >"$marker_path"
+		fi
+	fi
+	mkdir -p "$results_dir"
 
 	GIT_HTTP_ROOT=$repo_root
-	GIT_HTTP_REPO_NAME=$repo_name
-	export GIT_HTTP_ROOT GIT_HTTP_REPO_NAME
+	GIT_HTTP_REPO_NAMES=$repo_names
+	GIT_CLOUD_ODB_METRICS_PATH=${GIT_CLOUD_ODB_METRICS_PATH:-$results_dir/process.ndjson}
+	CLOUD_BENCH_LATEST_RESULT=${CLOUD_BENCH_LATEST_RESULT:-$results_dir/latest.json}
+	export GIT_HTTP_ROOT GIT_HTTP_REPO_NAMES GIT_CLOUD_ODB_METRICS_PATH
+	export CLOUD_BENCH_LATEST_RESULT
 
 	script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
 	exec python3 "$script_dir/http-server.py"

@@ -330,13 +330,108 @@ out:
 	return ret;
 }
 
+int odb_segment_group_open_reader(struct odb_segment_group *segment,
+				  const char *data_label,
+				  uint64_t data_bytes,
+				  const void *data_header,
+				  size_t data_header_size,
+				  const void *index_data,
+				  size_t index_bytes,
+				  const struct git_hash_algo *hash_algo,
+				  odb_range_read_fn *range_read,
+				  odb_range_release_fn *range_release,
+				  void *range_data)
+{
+	const unsigned char *data = data_header;
+	const unsigned char *index = index_data;
+	const unsigned char *raw_groups;
+	const unsigned char *raw_entries;
+	uint64_t data_groups, data_objects, groups_nr, entries_nr;
+	uint64_t stored_data_bytes, expected_index_bytes;
+	uint32_t data_algo, index_algo;
+	size_t groups_size, entries_size, entry_size;
+
+	*segment = (struct odb_segment_group)ODB_SEGMENT_GROUP_INIT;
+	if (!data_label || !range_read || data_header_size != GROUP_DATA_HEADER_SIZE ||
+	    index_bytes < GROUP_INDEX_HEADER_SIZE ||
+	    data_bytes < GROUP_DATA_HEADER_SIZE)
+		return error(_("remote group segment pair has a truncated header"));
+	if (memcmp(data, GROUP_DATA_MAGIC, 4) ||
+	    memcmp(index, GROUP_INDEX_MAGIC, 4) ||
+	    get_be32(data + 4) != GROUP_VERSION ||
+	    get_be32(index + 4) != GROUP_VERSION)
+		return error(_("remote group segment pair has an unsupported format"));
+	data_algo = hash_algo_by_id(get_be32(data + 8));
+	index_algo = hash_algo_by_id(get_be32(index + 8));
+	if (!data_algo || data_algo != index_algo ||
+	    (hash_algo && data_algo != hash_algo_by_ptr(hash_algo)))
+		return error(_("remote group segment pair uses an incompatible object format"));
+	if (get_be32(data + 12) || get_be32(index + 12))
+		return error(_("remote group segment pair has non-zero reserved header data"));
+	segment->hash_algo = &hash_algos[data_algo];
+	segment->data_bytes = data_bytes;
+	segment->index_bytes = index_bytes;
+	data_groups = get_be64(data + 16);
+	data_objects = get_be64(data + 24);
+	entries_nr = get_be64(index + 16);
+	groups_nr = get_be64(index + 24);
+	stored_data_bytes = get_be64(index + 32);
+	segment->group_target = get_be64(index + 40);
+	if (data_groups != groups_nr || data_objects != entries_nr ||
+	    stored_data_bytes != data_bytes || !segment->group_target ||
+	    !!entries_nr != !!groups_nr)
+		return error(_("remote group segment pair has inconsistent headers"));
+	if (entries_nr > SIZE_MAX / sizeof(*segment->entries) ||
+	    groups_nr > SIZE_MAX / sizeof(*segment->groups) ||
+	    groups_nr > UINT32_MAX)
+		return error(_("remote group segment index has too many entries"));
+	segment->entries_nr = entries_nr;
+	segment->groups_nr = groups_nr;
+	entry_size = object_entry_size(segment->hash_algo);
+	if (segment->groups_nr >
+	    (SIZE_MAX - GROUP_INDEX_HEADER_SIZE) / GROUP_TABLE_ENTRY_SIZE)
+		goto too_large;
+	groups_size = st_mult(segment->groups_nr, GROUP_TABLE_ENTRY_SIZE);
+	if (segment->entries_nr >
+	    (SIZE_MAX - GROUP_INDEX_HEADER_SIZE - groups_size) / entry_size)
+		goto too_large;
+	entries_size = st_mult(segment->entries_nr, entry_size);
+	expected_index_bytes = GROUP_INDEX_HEADER_SIZE + groups_size + entries_size;
+	if (expected_index_bytes != index_bytes)
+		return error(_("remote group segment index has an invalid size"));
+	raw_groups = index + GROUP_INDEX_HEADER_SIZE;
+	raw_entries = raw_groups + groups_size;
+	if ((groups_size && parse_groups(segment, raw_groups)) ||
+	    (entries_size && parse_entries(segment, raw_entries))) {
+		odb_segment_group_close(segment);
+		return -1;
+	}
+	segment->data_path = xstrdup(data_label);
+	segment->range_read = range_read;
+	segment->range_release = range_release;
+	segment->range_data = range_data;
+	return 0;
+
+too_large:
+	odb_segment_group_close(segment);
+	return error(_("remote group segment index is too large"));
+}
+
 void odb_segment_group_close(struct odb_segment_group *segment)
 {
+	if (segment->range_release)
+		segment->range_release(segment->range_data);
 	free(segment->data_path);
 	free(segment->entries);
 	free(segment->groups);
-	free(segment->cached_group);
+	odb_segment_group_clear_cache(segment);
 	*segment = (struct odb_segment_group)ODB_SEGMENT_GROUP_INIT;
+}
+
+void odb_segment_group_clear_cache(struct odb_segment_group *segment)
+{
+	FREE_AND_NULL(segment->cached_group);
+	segment->cached_group_nr = SIZE_MAX;
 }
 
 int odb_segment_group_lookup(const struct odb_segment_group *segment,
@@ -375,22 +470,31 @@ static int load_group(struct odb_segment_group *segment, size_t group_nr)
 
 	if (segment->cached_group_nr == group_nr)
 		return 0;
-	if (group->compressed_size > SIZE_MAX || group->size >= SIZE_MAX ||
+	if (group->compressed_size > maximum_signed_value_of_type(ssize_t) ||
+	    group->size >= SIZE_MAX ||
 	    group->compressed_size > ULONG_MAX || group->size > ULONG_MAX)
 		return error(_("group segment group is too large to read"));
 	compressed = xmalloc(group->compressed_size);
 	data = xmallocz(group->size);
-	data_fd = open(segment->data_path, O_RDONLY);
-	if (data_fd < 0) {
-		free(compressed);
-		free(data);
-		return error_errno(_("unable to open group segment data '%s'"),
-				   segment->data_path);
+	if (segment->range_read) {
+		if (segment->range_read(segment->range_data, group->offset,
+					group->compressed_size, compressed))
+			result = -1;
+		else
+			result = group->compressed_size;
+	} else {
+		data_fd = open(segment->data_path, O_RDONLY);
+		if (data_fd < 0) {
+			free(compressed);
+			free(data);
+			return error_errno(_("unable to open group segment data '%s'"),
+					   segment->data_path);
+		}
+		result = pread_in_full(data_fd, compressed, group->compressed_size,
+				       group->offset);
+		if (close(data_fd) < 0 && result >= 0)
+			result = -1;
 	}
-	result = pread_in_full(data_fd, compressed, group->compressed_size,
-			       group->offset);
-	if (close(data_fd) < 0 && result >= 0)
-		result = -1;
 	if (result < 0) {
 		free(compressed);
 		free(data);

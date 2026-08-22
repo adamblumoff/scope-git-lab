@@ -20,3 +20,4 @@ GIT-USER-AGENT
 GIT-VERSION-FILE
 bin-wrappers/*
 !bin-wrappers/wrap-for-bin.sh
+!bin-wrappers/meson.build

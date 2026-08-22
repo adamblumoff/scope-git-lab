@@ -721,9 +721,9 @@ static int open_bitmap(struct repository *r,
 	for (source = r->objects->sources; source; source = source->next) {
 		struct odb_source_files *files;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 
 		if (!open_bitmap_for_source(files->packed, bitmap_git))
 			found = true;
@@ -3427,9 +3427,9 @@ int verify_bitmap_files(struct repository *r)
 		struct multi_pack_index *m;
 		char *midx_bitmap_name;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 		m = get_multi_pack_index(files->packed);
 
 		if (!m)

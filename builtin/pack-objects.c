@@ -1566,9 +1566,9 @@ static int want_cruft_object_mtime(struct repository *r,
 		struct odb_source_files *files;
 		struct packed_git **cache;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 		cache = packfile_store_get_kept_pack_cache(files->packed, flags);
 
 		for (; *cache; cache++) {
@@ -1765,9 +1765,9 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 		for (; source; source = source->next) {
 			struct odb_source_files *files;
 
-			if (source->type != ODB_SOURCE_FILES)
+			files = odb_source_files_try_delegate(source);
+			if (!files)
 				continue;
-			files = odb_source_files_downcast(source);
 			if (!odb_source_read_object_info(&files->loose->base, oid, NULL, 0))
 				return 0;
 		}
@@ -1795,9 +1795,9 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 		struct multi_pack_index *m;
 		struct pack_entry e;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 		m = get_multi_pack_index(files->packed);
 
 		if (m && fill_midx_entry(m, oid, &e)) {
@@ -1810,9 +1810,9 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 	for (source = the_repository->objects->sources; source; source = source->next) {
 		struct odb_source_files *files;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 
 		for (e = files->packed->packs.head; e; e = e->next) {
 			struct packed_git *p = e->pack;
@@ -4190,9 +4190,9 @@ static void add_cruft_object_entry(const struct object_id *oid, enum object_type
 			for (; !found && source; source = source->next) {
 				struct odb_source_files *files;
 
-				if (source->type != ODB_SOURCE_FILES)
+				files = odb_source_files_try_delegate(source);
+				if (!files)
 					continue;
-				files = odb_source_files_downcast(source);
 				if (!odb_source_read_object_info(&files->loose->base, oid, NULL, 0))
 					found = 1;
 			}
@@ -4546,9 +4546,9 @@ static void add_objects_in_unpacked_packs(void)
 	for (source = to_pack.repo->objects->sources; source; source = source->next) {
 		struct odb_source_files *files;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 
 		if (!source->local)
 			continue;
@@ -4652,7 +4652,7 @@ static int force_object_loose(struct odb_source *source,
 			      const struct object_id *oid,
 			      const time_t *mtime)
 {
-	struct odb_source_files *files = odb_source_files_downcast(source);
+	struct odb_source_files *files = odb_source_files_delegate(source);
 	const struct git_hash_algo *compat = source->odb->repo->compat_hash_algo;
 	struct object_info oi = OBJECT_INFO_INIT;
 	struct object_id compat_oid, *compat_oid_p = NULL;
@@ -4664,9 +4664,9 @@ static int force_object_loose(struct odb_source *source,
 	for (struct odb_source *s = source->odb->sources; s; s = s->next) {
 		struct odb_source_files *files;
 
-		if (s->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(s);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(s);
 		if (!odb_source_read_object_info(&files->loose->base, oid, NULL, 0))
 			return 0;
 	}

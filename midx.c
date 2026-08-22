@@ -832,14 +832,16 @@ void clear_midx_file(struct repository *r)
 		struct odb_source *source;
 
 		for (source = r->objects->sources; source; source = source->next) {
-			files = odb_source_files_downcast(source);
+			files = odb_source_files_try_delegate(source);
+			if (!files)
+				continue;
 			if (files->packed->midx)
 				close_midx(files->packed->midx);
 			files->packed->midx = NULL;
 		}
 	}
 
-	files = odb_source_files_downcast(r->objects->sources);
+	files = odb_source_files_delegate(r->objects->sources);
 	get_midx_filename(files->packed, &midx);
 
 	if (remove_path(midx.buf))
@@ -859,13 +861,15 @@ void clear_incremental_midx_files(struct repository *r,
 	struct strbuf chain = STRBUF_INIT;
 
 	for (source = r->objects->sources; source; source = source->next) {
-		files = odb_source_files_downcast(source);
+		files = odb_source_files_try_delegate(source);
+		if (!files)
+			continue;
 		if (files->packed->midx)
 			close_midx(files->packed->midx);
 		files->packed->midx = NULL;
 	}
 
-	files = odb_source_files_downcast(r->objects->sources);
+	files = odb_source_files_delegate(r->objects->sources);
 	get_midx_chain_filename(files->packed, &chain);
 
 	if (!keep_hashes && remove_path(chain.buf))

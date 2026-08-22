@@ -44,6 +44,17 @@ test_expect_success 'import files ODB into a segment store' '
 	test_path_is_dir repo/.git/objects/pack
 '
 
+test_expect_success RUST 'compatibility map uses the segment files delegate' '
+	git clone --quiet --bare --no-local \
+		"file://$(pwd)/repo" compat-segment.git &&
+	git -C compat-segment.git segment-store import &&
+	git -C compat-segment.git config core.repositoryformatversion 1 &&
+	git -C compat-segment.git config extensions.objectformat sha1 &&
+	git -C compat-segment.git config extensions.compatobjectformat sha256 &&
+	git -C compat-segment.git rev-parse --git-dir >compat.gitdir &&
+	test_file_not_empty compat.gitdir
+'
+
 test_expect_success 'stats describe the imported segment store' '
 	object_count=$(sed -n "$=" objects.before) &&
 	git -C repo segment-store stats >stats &&
@@ -107,8 +118,30 @@ test_expect_success 'manifest activates segment reads without files ODB data' '
 	test_cmp log.before log.after
 '
 
-test_expect_success 'connectivity-only fsck reads the segment store' '
+test_expect_success 'full and connectivity-only fsck read the segment store' '
+	git -C repo fsck --strict --no-dangling &&
 	git -C repo fsck --connectivity-only --no-dangling
+'
+
+test_expect_success 'fsck verifies files metadata behind a segment source' '
+	git clone --quiet --bare --no-local \
+		"file://$(pwd)/repo" fsck-metadata.git &&
+	git -C fsck-metadata.git commit-graph write --reachable &&
+	git -C fsck-metadata.git segment-store import &&
+	printf broken >fsck-metadata.git/objects/info/commit-graph &&
+	test_must_fail git -C fsck-metadata.git fsck --strict 2>fsck-metadata.err &&
+	test_file_not_empty fsck-metadata.err
+'
+
+test_expect_success 'fsck checks loose rollback objects behind a segment source' '
+	rollback_loose_oid=$(printf "loose rollback object" | git hash-object --stdin) &&
+	rollback_loose_dir=$(printf "%s" "$rollback_loose_oid" | cut -c1-2) &&
+	rollback_loose_file=$(printf "%s" "$rollback_loose_oid" | cut -c3-) &&
+	mkdir -p "repo/.git/objects/$rollback_loose_dir" &&
+	printf broken >"repo/.git/objects/$rollback_loose_dir/$rollback_loose_file" &&
+	test_must_fail git -C repo fsck --strict --no-dangling 2>loose-fsck.err &&
+	test_file_not_empty loose-fsck.err &&
+	rm "repo/.git/objects/$rollback_loose_dir/$rollback_loose_file"
 '
 
 test_expect_success 'upload-pack clones from segment-only storage' '
@@ -243,7 +276,7 @@ test_expect_success 'metadata paths do not inflate segment payloads' '
 	git -C repo cat-file --batch-check="%(objectname) %(objecttype) \
 		%(objectsize) %(objectsize:disk)" <objects.before >/dev/null &&
 	git -C repo cat-file -e HEAD^{commit} &&
-	test_might_fail git -C repo fsck --no-dangling 2>err &&
+	test_must_fail git -C repo fsck --no-dangling 2>err &&
 	test_file_not_empty err
 '
 

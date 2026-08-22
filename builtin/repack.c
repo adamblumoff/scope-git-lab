@@ -9,6 +9,7 @@
 #include "server-info.h"
 #include "string-list.h"
 #include "midx.h"
+#include "odb/source.h"
 #include "packfile.h"
 #include "prune-packed.h"
 #include "promisor-remote.h"
@@ -246,6 +247,8 @@ int cmd_repack(int argc,
 
 	argc = parse_options(argc, argv, prefix, builtin_repack_options,
 				git_repack_usage, 0);
+	if (repo->objects->sources->type == ODB_SOURCE_CLOUD)
+		die(_("repack is not supported with a cloud ODB"));
 
 	po_args.window = xstrdup_or_null(opt_window);
 	po_args.window_memory = xstrdup_or_null(opt_window_memory);
@@ -457,7 +460,7 @@ int cmd_repack(int argc,
 	}
 
 	if (!names.nr) {
-		struct odb_source_files *files = odb_source_files_downcast(existing.source);
+		struct odb_source_files *files = odb_source_files_delegate(existing.source);
 
 		if (!po_args.quiet)
 			printf_ln(_("Nothing new to pack."));
@@ -627,7 +630,7 @@ int cmd_repack(int argc,
 		update_server_info(repo, 0);
 
 	if (git_env_bool(GIT_TEST_MULTI_PACK_INDEX, 0)) {
-		struct odb_source_files *files = odb_source_files_downcast(existing.source);
+		struct odb_source_files *files = odb_source_files_delegate(existing.source);
 		unsigned flags = 0;
 
 		if (git_env_bool(GIT_TEST_MULTI_PACK_INDEX_WRITE_INCREMENTAL, 0))

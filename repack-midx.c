@@ -557,7 +557,7 @@ static void repack_make_midx_append_plan(struct repack_write_midx_opts *opts,
 					 struct midx_compaction_step **steps_p,
 					 size_t *steps_nr_p)
 {
-	struct odb_source_files *files = odb_source_files_downcast(opts->existing->source);
+	struct odb_source_files *files = odb_source_files_delegate(opts->existing->source);
 	struct multi_pack_index *m;
 	struct midx_compaction_step *steps = NULL;
 	struct midx_compaction_step *step;
@@ -607,7 +607,7 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 					    struct midx_compaction_step **steps_p,
 					    size_t *steps_nr_p)
 {
-	struct odb_source_files *files = odb_source_files_downcast(opts->existing->source);
+	struct odb_source_files *files = odb_source_files_delegate(opts->existing->source);
 	struct multi_pack_index *m;
 	struct midx_compaction_step *steps = NULL;
 	struct midx_compaction_step step = { 0 };
@@ -940,7 +940,7 @@ out:
 
 static int write_midx_incremental(struct repack_write_midx_opts *opts)
 {
-	struct odb_source_files *files = odb_source_files_downcast(opts->existing->source);
+	struct odb_source_files *files = odb_source_files_delegate(opts->existing->source);
 	struct midx_compaction_step *steps = NULL;
 	struct strbuf lock_name = STRBUF_INIT;
 	struct lock_file lf;

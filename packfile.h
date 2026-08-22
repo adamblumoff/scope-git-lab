@@ -83,9 +83,9 @@ static inline struct repo_for_each_pack_data repo_for_eack_pack_data_init(struct
 		struct odb_source_files *files;
 		struct packfile_list_entry *entry;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 		entry = packfile_store_get_packs(files->packed);
 		if (!entry)
 			continue;
@@ -109,9 +109,9 @@ static inline void repo_for_each_pack_data_next(struct repo_for_each_pack_data *
 		struct odb_source_files *files;
 		struct packfile_list_entry *entry;
 
-		if (source->type != ODB_SOURCE_FILES)
+		files = odb_source_files_try_delegate(source);
+		if (!files)
 			continue;
-		files = odb_source_files_downcast(source);
 		entry = packfile_store_get_packs(files->packed);
 		if (!entry)
 			continue;

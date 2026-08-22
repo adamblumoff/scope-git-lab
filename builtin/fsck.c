@@ -16,6 +16,8 @@
 #include "object-file.h"
 #include "object-name.h"
 #include "odb.h"
+#include "odb/source.h"
+#include "odb/source-files.h"
 #include "odb/streaming.h"
 #include "path.h"
 #include "read-cache-ll.h"
@@ -789,16 +791,67 @@ static int fsck_subdir(unsigned int nr, const char *path UNUSED, void *data)
 	return 0;
 }
 
+static int fsck_generic_object(const struct object_id *oid,
+			       struct object_info *oi, void *cb_data)
+{
+	struct repository *repo = cb_data;
+	void *content;
+	int eaten = 0;
+
+	if (!oi || !oi->typep || !oi->sizep || !oi->contentp ||
+	    *oi->sizep > ULONG_MAX) {
+		errors_found |= ERROR_OBJECT;
+		error(_("unable to inspect object %s from generic ODB source"),
+		      oid_to_hex(oid));
+		return 0;
+	}
+	content = *oi->contentp;
+	if (check_object_signature(repo, oid, content, *oi->sizep,
+				   *oi->typep)) {
+		errors_found |= ERROR_OBJECT;
+		free(content);
+		*oi->contentp = NULL;
+		return 0;
+	}
+	if (fsck_obj_buffer(oid, *oi->typep, *oi->sizep, content, &eaten,
+			    repo))
+		errors_found |= ERROR_OBJECT;
+	if (!eaten)
+		free(content);
+	*oi->contentp = NULL;
+	return 0;
+}
+
 static void fsck_source(struct repository *repo, struct odb_source *source)
 {
+	struct odb_source_files *files;
 	struct progress *progress = NULL;
 	struct for_each_loose_cb cb_data = {
 		.repo = source->odb->repo,
 		.progress = progress,
 	};
+	struct odb_for_each_object_options opts = { 0 };
+	enum object_type type;
+	size_t size;
+	void *content = NULL;
+	struct object_info request = OBJECT_INFO_INIT;
 
 	if (verbose)
 		fprintf_ln(stderr, _("Checking object directory"));
+	if (source->type != ODB_SOURCE_FILES) {
+		request.typep = &type;
+		request.sizep = &size;
+		request.contentp = &content;
+		if (odb_source_for_each_object(source, &request,
+					       fsck_generic_object, repo, &opts)) {
+			errors_found |= ERROR_OBJECT;
+			error(_("unable to enumerate generic ODB source"));
+		}
+		files = odb_source_files_try_delegate(source);
+		if (!files)
+			return;
+		source = &files->base;
+	}
 
 	if (show_progress)
 		progress = start_progress(repo,
@@ -1157,12 +1210,17 @@ int cmd_fsck(int argc,
 
 		odb_prepare_alternates(repo->objects);
 		for (source = repo->objects->sources; source; source = source->next) {
-			if (source->type != ODB_SOURCE_FILES)
+			struct odb_source_files *files;
+
+			if (source->type != ODB_SOURCE_FILES &&
+			    source->type != ODB_SOURCE_SEGMENT &&
+			    source->type != ODB_SOURCE_CLOUD)
 				continue;
+			files = odb_source_files_delegate(source);
 			child_process_init(&commit_graph_verify);
 			commit_graph_verify.git_cmd = 1;
 			strvec_pushl(&commit_graph_verify.args, "commit-graph",
-				     "verify", "--object-dir", source->path, NULL);
+				     "verify", "--object-dir", files->base.path, NULL);
 			if (show_progress)
 				strvec_push(&commit_graph_verify.args, "--progress");
 			else
@@ -1177,12 +1235,17 @@ int cmd_fsck(int argc,
 
 		odb_prepare_alternates(repo->objects);
 		for (source = repo->objects->sources; source; source = source->next) {
-			if (source->type != ODB_SOURCE_FILES)
+			struct odb_source_files *files;
+
+			if (source->type != ODB_SOURCE_FILES &&
+			    source->type != ODB_SOURCE_SEGMENT &&
+			    source->type != ODB_SOURCE_CLOUD)
 				continue;
+			files = odb_source_files_delegate(source);
 			child_process_init(&midx_verify);
 			midx_verify.git_cmd = 1;
 			strvec_pushl(&midx_verify.args, "multi-pack-index",
-				     "verify", "--object-dir", source->path, NULL);
+				     "verify", "--object-dir", files->base.path, NULL);
 			if (show_progress)
 				strvec_push(&midx_verify.args, "--progress");
 			else

@@ -25,6 +25,7 @@
 #include "object-file.h"
 #include "object-name.h"
 #include "odb.h"
+#include "odb/source.h"
 #include "mem-pool.h"
 #include "commit-reach.h"
 #include "khash.h"
@@ -877,7 +878,8 @@ static void end_packfile(void)
 	running = 1;
 	clear_delta_base_cache();
 	if (object_count) {
-		struct odb_source_files *files = odb_source_files_downcast(pack_data->repo->objects->sources);
+		struct odb_source_files *files =
+			odb_source_files_delegate(pack_data->repo->objects->sources);
 		struct packed_git *new_p;
 		struct object_id cur_pack_oid;
 		char *idx_name;
@@ -985,7 +987,7 @@ static int store_object(
 	}
 
 	for (source = the_repository->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct odb_source_files *files = odb_source_files_delegate(source);
 
 		if (!packfile_list_find_oid(packfile_store_get_packs(files->packed), &oid))
 			continue;
@@ -1193,7 +1195,7 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 	}
 
 	for (source = the_repository->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
+		struct odb_source_files *files = odb_source_files_delegate(source);
 
 		if (!packfile_list_find_oid(packfile_store_get_packs(files->packed), &oid))
 			continue;
@@ -3952,6 +3954,8 @@ int cmd_fast_import(int argc,
 	unsigned int i;
 
 	show_usage_if_asked(argc, argv, fast_import_usage);
+	if (repo->objects->sources->type == ODB_SOURCE_CLOUD)
+		die(_("fast-import is not supported with a cloud ODB"));
 
 	reset_pack_idx_option(&pack_idx_opts);
 	git_pack_config();

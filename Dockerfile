@@ -49,9 +49,12 @@ RUN apt-get update \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/git/ /
-COPY contrib/cloud-bench/cloud-bench contrib/cloud-bench/http-server.py /app/bin/
+COPY contrib/cloud-bench/cloud-bench contrib/cloud-bench/http-server.py \
+	contrib/cloud-bench/matrix.py \
+	contrib/cloud-bench/smoke-cloud-fallback.sh /app/bin/
 
-RUN chmod 0755 /app/bin/cloud-bench /app/bin/http-server.py
+RUN chmod 0755 /app/bin/cloud-bench /app/bin/http-server.py /app/bin/matrix.py \
+	/app/bin/smoke-cloud-fallback.sh
 
 WORKDIR /app
 ENV PATH="/usr/local/bin:/usr/local/libexec/git-core:${PATH}" \

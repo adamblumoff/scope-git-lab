@@ -21,6 +21,12 @@ struct odb_source_files *odb_source_files_new(struct object_database *odb,
 					      const char *path,
 					      bool local);
 
+/* Return the files backend used directly or as a source's local fallback. */
+struct odb_source_files *odb_source_files_delegate(struct odb_source *source);
+
+/* Return the files backend or local fallback, if the source has one. */
+struct odb_source_files *odb_source_files_try_delegate(struct odb_source *source);
+
 /*
  * Optimize the files object database source by repacking loose objects and
  * packfiles as needed. Returns 0 on success, a negative error code otherwise.
