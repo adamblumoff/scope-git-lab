@@ -132,7 +132,15 @@ test -f "$fallback_loose_path"
 git -C "$bare" cat-file -e "$fallback_loose_oid^{commit}"
 git -C "$bare" multi-pack-index write
 git -C "$bare" multi-pack-index verify
-git -C "$bare" repack -ad
+set +e
+git -C "$bare" repack -ad \
+	>"$trash/repack.out" 2>"$trash/repack.err"
+repack_status=$?
+set -e
+test "$repack_status" -ne 0
+grep "repack is not supported with a cloud ODB" \
+	"$trash/repack.err" >/dev/null
+test -f "$fallback_loose_path"
 
 printf 'failpoint staging\n' >>"$client/object"
 git -C "$client" commit --quiet -am failpoint-staging

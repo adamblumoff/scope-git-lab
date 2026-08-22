@@ -9,6 +9,7 @@
 #include "server-info.h"
 #include "string-list.h"
 #include "midx.h"
+#include "odb/source.h"
 #include "packfile.h"
 #include "prune-packed.h"
 #include "promisor-remote.h"
@@ -246,6 +247,8 @@ int cmd_repack(int argc,
 
 	argc = parse_options(argc, argv, prefix, builtin_repack_options,
 				git_repack_usage, 0);
+	if (repo->objects->sources->type == ODB_SOURCE_CLOUD)
+		die(_("repack is not supported with a cloud ODB"));
 
 	po_args.window = xstrdup_or_null(opt_window);
 	po_args.window_memory = xstrdup_or_null(opt_window_memory);
