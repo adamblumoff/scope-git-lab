@@ -273,11 +273,26 @@ direct_commit=$(printf 'direct publication graph\n' |
 	GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
 	git -C "$bare" commit-tree "$direct_tree")
 git -C "$bare" update-ref refs/heads/direct "$direct_commit"
-GIT_CLOUD_ODB_METRICS_PATH=$direct_metrics \
+direct_recovery_one=$trash/direct-recovery-one.jsonl
+direct_recovery_two=$trash/direct-recovery-two.jsonl
+GIT_CLOUD_ODB_METRICS_PATH=$direct_recovery_one \
 GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
 GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
 	git -C "$bare" cloud-bench recover
-if grep -q '"method":"DELETE"' "$direct_metrics"
+GIT_CLOUD_ODB_METRICS_PATH=$direct_recovery_two \
+GIT_CLOUD_ODB_METRICS_RUN=$direct_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+test "$(grep -c '"rangeRequests":1' "$direct_recovery_one")" = \
+	"$(grep -c '"rangeRequests":1' "$direct_recovery_two")"
+grep '"method":"PUT"' "$direct_recovery_one" >/dev/null
+if grep -q '"method":"PUT"' "$direct_recovery_two"
+then
+	echo >&2 "published recovery left direct-write journal records"
+	exit 1
+fi
+if grep -q '"method":"DELETE"' "$direct_recovery_one" ||
+	grep -q '"method":"DELETE"' "$direct_recovery_two"
 then
 	echo >&2 "recovery deleted a transitively reachable publication"
 	exit 1

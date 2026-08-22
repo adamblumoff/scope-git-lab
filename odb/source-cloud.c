@@ -12,7 +12,6 @@
 #include "odb/source-files.h"
 #include "odb/streaming.h"
 #include "oidset.h"
-#include "refs.h"
 #include "repository.h"
 #include "strbuf.h"
 #include "string-list.h"
@@ -1124,107 +1123,20 @@ static int manifest_protects_key(const struct odb_cloud_manifest *manifest,
 	return 0;
 }
 
-struct cloud_reference_data {
-	struct ref_store *refs;
-	struct oidset *oids;
-};
-
-static int add_reference_tip(struct cloud_reference_data *data,
-			     const struct object_id *oid)
+static int pending_artifact_is_published(
+	const struct odb_cloud_manifest *manifest,
+	const struct odb_cloud_pending_artifact *pending)
 {
-	if (is_null_oid(oid))
-		return 0;
-	oidset_insert(data->oids, oid);
-	return 0;
-}
+	for (size_t i = 0; i < manifest->artifacts_nr; i++) {
+		const struct odb_cloud_artifact *artifact = &manifest->artifacts[i];
 
-static int add_reference_ref(const struct reference *ref, void *cb_data)
-{
-	return add_reference_tip(cb_data, ref->oid);
-}
-
-static int add_reference_reflog_oid(
-	const char *refname UNUSED, struct object_id *old_oid,
-	struct object_id *new_oid, const char *committer UNUSED,
-	timestamp_t timestamp UNUSED, int tz UNUSED,
-	const char *msg UNUSED, void *cb_data)
-{
-	struct cloud_reference_data *data = cb_data;
-
-	return add_reference_tip(data, old_oid) ||
-		add_reference_tip(data, new_oid);
-}
-
-static int add_reference_reflog(const char *refname, void *cb_data)
-{
-	struct cloud_reference_data *data = cb_data;
-
-	return refs_for_each_reflog_ent(data->refs, refname,
-					add_reference_reflog_oid, data);
-}
-
-static int collect_reference_tips(struct odb_source_cloud *source,
-				  struct oidset *oids)
-{
-	struct cloud_reference_data data = {
-		.refs = get_main_ref_store(source->base.odb->repo),
-		.oids = oids,
-	};
-
-	if (refs_for_each_ref(data.refs, add_reference_ref, &data) ||
-	    refs_head_ref(data.refs, add_reference_ref, &data) ||
-	    refs_for_each_reflog(data.refs, add_reference_reflog, &data)) {
-		error(_("unable to inspect refs for cloud ODB recovery"));
-		return -1;
+		if (!strcmp(artifact->data_key, pending->data_key) &&
+		    artifact->data_bytes == pending->data_bytes &&
+		    !strcmp(artifact->index_key, pending->index_key) &&
+		    artifact->index_bytes == pending->index_bytes)
+			return 1;
 	}
 	return 0;
-}
-
-static int pending_artifact_has_ref(
-	struct odb_source_cloud *source,
-	const struct odb_cloud_pending_artifact *pending,
-	const struct oidset *ref_oids, int *found)
-{
-	struct odb_cloud_artifact artifact = {
-		.data_key = pending->data_key,
-		.index_key = pending->index_key,
-		.data_bytes = pending->data_bytes,
-		.index_bytes = pending->index_bytes,
-	};
-	struct odb_segment_group reader = { 0 };
-	struct s3_response index = S3_RESPONSE_INIT;
-	struct cloud_range *range = NULL;
-	struct strbuf label = STRBUF_INIT;
-	unsigned char header[CLOUD_GROUP_HEADER_SIZE];
-	int ret = -1;
-
-	*found = 0;
-	if (cloud_get_index(source, &artifact, &index) ||
-	    s3_client_read_range(&source->client, artifact.data_key,
-				 artifact.data_bytes, 0, CLOUD_GROUP_HEADER_SIZE,
-				 header))
-		goto out;
-	range = cloud_range_new(source, artifact.data_key, artifact.data_bytes);
-	strbuf_addf(&label, "pending/%s", pending->token);
-	if (odb_segment_group_open_reader(
-		    &reader, label.buf, artifact.data_bytes, header,
-		    CLOUD_GROUP_HEADER_SIZE, index.body.buf, index.body.len,
-		    source->base.odb->repo->hash_algo, cloud_range_read,
-		    cloud_range_release, range))
-		goto out;
-	range = NULL;
-	for (size_t i = 0; i < reader.entries_nr; i++)
-		if (oidset_contains(ref_oids, &reader.entries[i].oid)) {
-			*found = 1;
-			break;
-		}
-	ret = 0;
-out:
-	odb_segment_group_close(&reader);
-	cloud_range_release(range);
-	strbuf_release(&label);
-	s3_response_release(&index);
-	return ret;
 }
 
 static int recover_pending_artifacts(struct odb_source_cloud *source,
@@ -1232,7 +1144,6 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 				     int recover_abandoned)
 {
 	char gc_token[33] = "";
-	struct oidset ref_oids = OIDSET_INIT;
 	time_t current_time = time(NULL);
 	uint64_t now;
 	uint64_t grace = git_env_ulong(
@@ -1241,7 +1152,6 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 	uint64_t lease_seconds = git_env_ulong(
 		"GIT_TEST_CLOUD_ODB_GC_LEASE_SECONDS",
 		CLOUD_GC_LEASE_SECONDS);
-	int references_collected = 0;
 	int final_ret = -1;
 
 	if (current_time <= 0)
@@ -1257,48 +1167,33 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 		if (cloud_get_manifest(source, &manifest, &etag) ||
 		    cloud_manifest_within_limits(source, &manifest))
 			goto attempt_out;
-		if (reconcile_published && !references_collected) {
-			int has_published = 0;
-
-			for (size_t i = 0; i < manifest.pending_nr; i++)
-				if (manifest.pending[i].state ==
-				    ODB_CLOUD_PENDING_PUBLISHED) {
-					has_published = 1;
-					break;
-				}
-			if (has_published) {
-				if (collect_reference_tips(source, &ref_oids))
-					goto attempt_out;
-				references_collected = 1;
-			}
-		}
 		for (size_t i = 0; i < manifest.pending_nr;) {
 			struct odb_cloud_pending_artifact *pending =
 				&manifest.pending[i];
-			int referenced = 0;
+			char pending_token[33];
 
 			if (pending->state == ODB_CLOUD_PENDING_PUBLISHED) {
 				if (!reconcile_published) {
 					i++;
 					continue;
 				}
-				if (pending_artifact_has_ref(source, pending, &ref_oids,
-							     &referenced))
-					goto attempt_out;
-				if (referenced) {
-					char token[33];
-
-					strlcpy(token, pending->token, sizeof(token));
-					odb_cloud_manifest_remove_pending(&manifest, token);
-					changed = 1;
-					continue;
-				}
 				/*
-				 * Absence from a ref snapshot cannot prove that a
-				 * concurrent ref transaction will not commit this
-				 * publication. Leave destructive published GC to a
-				 * future ref-fenced maintenance protocol.
+				 * Publication adds the artifact and advances this
+				 * journal state in one manifest CAS. Membership is
+				 * therefore sufficient to finalize the journal; it
+				 * does not make an unreferenced artifact deletable.
 				 */
+				if (!pending_artifact_is_published(&manifest, pending)) {
+					error(_("cloud ODB published artifact is absent "
+						"from the manifest"));
+					goto attempt_out;
+				}
+				strlcpy(pending_token, pending->token,
+					sizeof(pending_token));
+				odb_cloud_manifest_remove_pending(&manifest,
+							  pending_token);
+				changed = 1;
+				continue;
 			} else if (!recover_abandoned) {
 				i++;
 				continue;
@@ -1387,7 +1282,6 @@ attempt_out:
 	}
 	error(_("cloud ODB recovery CAS retry limit exceeded"));
 out:
-	oidset_clear(&ref_oids);
 	return final_ret;
 }
 
@@ -1397,8 +1291,6 @@ int odb_source_cloud_recover(struct odb_source_cloud *source)
 		return error(_("published recovery requires the cloud ODB's owning repository"));
 	if (recover_pending_artifacts(source, 1, 0))
 		return -1;
-	/* Recovery may remove an unreferenced artifact from any ordinal. */
-	cloud_clear_readers(source);
 	return cloud_load(source);
 }
 
