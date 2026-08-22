@@ -1228,7 +1228,8 @@ out:
 }
 
 static int recover_pending_artifacts(struct odb_source_cloud *source,
-				     int reconcile_published)
+				     int reconcile_published,
+				     int recover_abandoned)
 {
 	char gc_token[33] = "";
 	struct oidset ref_oids = OIDSET_INIT;
@@ -1298,6 +1299,9 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 				 * publication. Leave destructive published GC to a
 				 * future ref-fenced maintenance protocol.
 				 */
+			} else if (!recover_abandoned) {
+				i++;
+				continue;
 			} else if (pending->state == ODB_CLOUD_PENDING_DELETING)
 				has_recovery = 1;
 			else if (pending_is_expired(pending, now, grace)) {
@@ -1306,6 +1310,10 @@ static int recover_pending_artifacts(struct odb_source_cloud *source,
 				changed = 1;
 			}
 			i++;
+		}
+		if (!recover_abandoned) {
+			ret = changed ? cloud_cas_manifest(source, &manifest, &etag) : 0;
+			goto attempt_out;
 		}
 		if (!manifest.gc_token && !has_recovery && !changed) {
 			ret = 0;
@@ -1387,7 +1395,7 @@ int odb_source_cloud_recover(struct odb_source_cloud *source)
 {
 	if (!source->base.local)
 		return error(_("published recovery requires the cloud ODB's owning repository"));
-	if (recover_pending_artifacts(source, 1))
+	if (recover_pending_artifacts(source, 1, 0))
 		return -1;
 	/* Recovery may remove an unreferenced artifact from any ordinal. */
 	cloud_clear_readers(source);
@@ -1815,7 +1823,8 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->prefix = (struct strbuf)STRBUF_INIT;
 	source->manifest_key = (struct strbuf)STRBUF_INIT;
 	odb_source_init(&source->base, odb, ODB_SOURCE_CLOUD, path, local);
-	cloud_cleanup_local_staging(path);
+	if (local)
+		cloud_cleanup_local_staging(path);
 	if (s3_client_init_from_env(&source->client))
 		die(_("unable to configure cloud ODB at '%s'"), path);
 	s3_client_storage_id(&source->client, &storage_id);
@@ -1840,7 +1849,7 @@ struct odb_source_cloud *odb_source_cloud_new(struct object_database *odb,
 	source->base.write_alternate = cloud_write_alternate;
 	source->base.optimize = cloud_optimize;
 	source->base.optimize_required = cloud_optimize_required;
-	if (recover_pending_artifacts(source, 0))
+	if (local && recover_pending_artifacts(source, 0, 1))
 		warning(_("unable to finish cloud ODB pending-artifact recovery"));
 	if (cloud_load(source))
 		die(_("unable to open cloud ODB at '%s'"), path);

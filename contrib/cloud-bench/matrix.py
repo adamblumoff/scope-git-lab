@@ -494,8 +494,8 @@ def run_sample(corpus, cursor, url, run_id, sample_ordinal, writers, warmup):
         ]
         raw = [future.result() for future in futures]
     wall_ms = round((time.perf_counter() - started) * 1000, 3)
-    metrics = cursor.read(mark)
     _, refs, _ = visible_refs(url, run_id)
+    metrics = cursor.read(mark)
     expected = {item["ref"] for item in raw if item["success"]}
     failed = {item["ref"] for item in raw if not item["success"]}
     successful_latencies = [item["latencyMs"] for item in raw if item["success"]]
@@ -535,8 +535,8 @@ def run_failpoints(corpus, cursor, url, run_id, ordinal_base):
             failpoint,
             cursor.recovery_dir,
         )
-        metrics = cursor.read(mark)
         ref_status, refs, ref_error = visible_refs(url, run_id)
+        metrics = cursor.read(mark)
         results.append(
             {
                 "name": failpoint,

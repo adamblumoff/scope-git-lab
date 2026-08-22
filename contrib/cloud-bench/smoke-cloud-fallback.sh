@@ -234,10 +234,18 @@ alternate_consumer=$trash/alternate-consumer.git
 git init --bare --quiet "$alternate_consumer"
 printf '%s\n' "$bare/objects" \
 	>"$alternate_consumer/objects/info/alternates"
+shared_staging=$bare/objects/cloud-write-999999
+mkdir "$shared_staging"
+printf 'shared writer data\n' >"$shared_staging/data.gsg"
+printf 'shared writer index\n' >"$shared_staging/index.gsi"
 GIT_CLOUD_ODB_METRICS_PATH=$alternate_metrics \
 GIT_CLOUD_ODB_METRICS_RUN=$alternate_run \
 GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
 	git -C "$alternate_consumer" cat-file -e "$alternate_oid^{blob}"
+test -f "$shared_staging/data.gsg"
+test -f "$shared_staging/index.gsi"
+rm "$shared_staging/data.gsg" "$shared_staging/index.gsi"
+rmdir "$shared_staging"
 if grep -q '"method":"DELETE"' "$alternate_metrics"
 then
 	echo >&2 "alternate consumer reclaimed its owner's publication"
@@ -301,6 +309,33 @@ then
 	exit 1
 fi
 git -C "$bare" cat-file -e "$(git -C "$client" rev-parse HEAD)^{commit}"
+
+double_orphan_metrics=$trash/double-orphan-metrics.jsonl
+double_orphan_run=77777777777777777777777777777777
+for orphan_label in one two
+do
+	printf 'double orphan %s\n' "$orphan_label" >>"$client/object"
+	git -C "$client" commit --quiet -am "double-orphan-$orphan_label"
+	set +e
+	GIT_CLOUD_ODB_METRICS_PATH=$double_orphan_metrics \
+	GIT_CLOUD_ODB_METRICS_RUN=$double_orphan_run \
+	GIT_TEST_CLOUD_ODB_FAILPOINT=after-artifact-upload \
+		git -C "$client" push --quiet "$bare" HEAD:main
+	double_orphan_status=$?
+	set -e
+	test "$double_orphan_status" -ne 0
+done
+GIT_CLOUD_ODB_METRICS_PATH=$double_orphan_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$double_orphan_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+test "$(grep -c '"method":"DELETE"' "$double_orphan_metrics")" = 2
+GIT_CLOUD_ODB_METRICS_PATH=$double_orphan_metrics \
+GIT_CLOUD_ODB_METRICS_RUN=$double_orphan_run \
+GIT_TEST_CLOUD_ODB_PENDING_GRACE_SECONDS=0 \
+	git -C "$bare" cloud-bench recover
+test "$(grep -c '"method":"DELETE"' "$double_orphan_metrics")" = 4
+
 printf 'second cloud artifact\n' >>"$client/object"
 git -C "$client" commit --quiet -am second-cloud-artifact
 git -C "$client" push --quiet "$bare" HEAD:main
